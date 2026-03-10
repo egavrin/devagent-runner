@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "baseUrl": ".",
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
@@ -13,6 +14,20 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
+    "paths": {
+      "@devagent-runner/core": [
+        "packages/core/src/index.ts"
+      ],
+      "@devagent-runner/local-runner": [
+        "packages/local-runner/src/index.ts"
+      ],
+      "@devagent-runner/adapters": [
+        "packages/adapters/src/index.ts"
+      ],
+      "@devagent-runner/cli": [
+        "packages/cli/src/index.ts"
+      ]
+    },
     "types": [
       "node"
     ]
