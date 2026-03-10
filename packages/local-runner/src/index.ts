@@ -17,6 +17,7 @@ import type {
   TaskExecutionResult,
   WorkspaceSpec,
 } from "@devagent-sdk/types";
+import { PROTOCOL_VERSION } from "@devagent-sdk/types";
 
 type RunMetadata = {
   runId: string;
@@ -151,6 +152,24 @@ function safeWorkspaceName(workBranch: string): string {
   return normalized || "workspace";
 }
 
+function createTimeoutResult(request: TaskExecutionRequest, startedAt: string): TaskExecutionResult {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    taskId: request.taskId,
+    status: "failed",
+    artifacts: [],
+    metrics: {
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      durationMs: Date.now() - new Date(startedAt).getTime(),
+    },
+    error: {
+      code: "EXECUTION_FAILED",
+      message: `Task exceeded timeoutSec (${request.constraints.timeoutSec})`,
+    },
+  };
+}
+
 export class FileSystemWorkspaceManager implements WorkspaceManager {
   async prepare(spec: WorkspaceSpec): Promise<{ workspacePath: string }> {
     const runnerRoot = workspaceRootFor(spec.sourceRepoPath);
@@ -282,9 +301,35 @@ export class LocalRunner implements RunnerClient {
     await writeFile(join(runsDir, `${handle.id}.json`), JSON.stringify(metadata, null, 2));
     this.knownRuns.set(handle.id, metadata);
 
+    const startedAt = new Date().toISOString();
+    const resultPromise = handle.wait();
+    const timedPromise = request.constraints.timeoutSec && request.constraints.timeoutSec > 0
+      ? new Promise<TaskExecutionResult>((resolve) => {
+          const timeoutMs = request.constraints.timeoutSec! * 1000;
+          const timer = setTimeout(async () => {
+            try {
+              await handle.cancel();
+            } catch {
+              // Best-effort cancel.
+            }
+            const timeoutResult = createTimeoutResult(request, startedAt);
+            onEvent({
+              protocolVersion: PROTOCOL_VERSION,
+              type: "completed",
+              at: timeoutResult.metrics.finishedAt,
+              taskId: request.taskId,
+              status: timeoutResult.status,
+            });
+            resolve(timeoutResult);
+          }, timeoutMs);
+
+          void resultPromise.finally(() => clearTimeout(timer));
+        })
+      : null;
+
     const wrappedHandle = new LocalRunHandle(
       handle.id,
-      handle.wait().then(async (result: TaskExecutionResult) => {
+      Promise.race([resultPromise, ...(timedPromise ? [timedPromise] : [])]).then(async (result: TaskExecutionResult) => {
         metadata.status = result.status;
         await writeFile(resultPath, JSON.stringify(result, null, 2));
         await writeFile(join(runsDir, `${handle.id}.json`), JSON.stringify(metadata, null, 2));

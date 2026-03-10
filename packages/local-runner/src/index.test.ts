@@ -367,6 +367,22 @@ test("local runner supports cancellation from a fresh process instance", async (
   assert.equal(result.status, "cancelled");
 });
 
+test("local runner fails a run that exceeds timeoutSec", async () => {
+  const repo = await createRepo();
+  const runner = new LocalRunner({
+    adapters: [new SleepingAdapter()],
+  });
+  const request = createRequest(repo, "task-timeout");
+  request.constraints.timeoutSec = 1;
+
+  const { runId } = await runner.startTask(request);
+  const result = await runner.awaitResult(runId);
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.error?.code, "EXECUTION_FAILED");
+  assert.equal(result.error?.message, "Task exceeded timeoutSec (1)");
+});
+
 test("local runner reads finished runs from persisted metadata", async () => {
   const repo = await createRepo();
   const runner = new LocalRunner({

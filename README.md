@@ -41,11 +41,23 @@ devagent-runner cancel <run-id>
 devagent-runner inspect <run-id>
 ```
 
+Example:
+
+```bash
+cp ../devagent-sdk/fixtures/request-plan.json /tmp/request-plan.json
+devagent-runner run --request /tmp/request-plan.json
+devagent-runner inspect <run-id>
+```
+
 ## Local Development Wiring
 
 For local MVP work this repo consumes `@devagent-sdk/*` through file dependencies from
 `../devagent-sdk`, and `devagent-hub` consumes this runner through file dependencies from
 `../devagent-runner/packages/*`.
+
+The supported local setup path is the bootstrap flow documented in
+[`devagent-hub/README.md`](../devagent-hub/README.md) and
+[`devagent-hub/BASELINE_VALIDATION.md`](../devagent-hub/BASELINE_VALIDATION.md).
 
 ## Validated Flow
 
@@ -55,8 +67,16 @@ The runner has been validated in the canonical path:
 devagent-hub -> LocalRunnerClient -> LocalRunner -> DevAgentAdapter -> devagent execute
 ```
 
-Stub smoke tests cover all four adapters, and live Hub validation has exercised the `DevAgentAdapter`
-path against a real GitHub repository.
+Adapter maturity today:
+
+- `DevAgentAdapter`
+  - live-validated and supported for the MVP path
+- `CodexAdapter`
+- `ClaudeAdapter`
+- `OpenCodeAdapter`
+  - adapter-present and smoke-tested, but still experimental
+
+Treat the experimental adapters as development surfaces, not production-equivalent executor paths.
 
 ## Development
 

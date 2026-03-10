@@ -81,6 +81,8 @@
 
     "@devagent-runner/adapters/@devagent-sdk/types": ["@devagent-sdk/types@file:../devagent-sdk/packages/types", {}],
 
+    "@devagent-runner/cli/@devagent-runner/adapters": ["@devagent-runner/adapters@file:packages/adapters", { "dependencies": { "@devagent-runner/core": "file:../core", "@devagent-sdk/types": "file:../../../devagent-sdk/packages/types" } }],
+
     "@devagent-runner/cli/@devagent-runner/local-runner": ["@devagent-runner/local-runner@file:packages/local-runner", { "dependencies": { "@devagent-runner/core": "file:../core", "@devagent-sdk/types": "file:../../../devagent-sdk/packages/types" } }],
 
     "@devagent-runner/cli/@devagent-sdk/validation": ["@devagent-sdk/validation@file:../devagent-sdk/packages/validation", { "dependencies": { "@devagent-sdk/schema": "file:../schema", "@devagent-sdk/types": "file:../types", "ajv": "^8.17.1", "ajv-formats": "^3.0.1" } }],
@@ -93,7 +95,11 @@
 
     "@devagent-runner/adapters/@devagent-runner/core/@devagent-sdk/types": ["@devagent-sdk/types@file:../devagent-sdk/packages/types", {}],
 
-    "@devagent-runner/cli/@devagent-runner/local-runner/@devagent-runner/core": ["@devagent-runner/core@file:packages/core", {}],
+    "@devagent-runner/cli/@devagent-runner/adapters/@devagent-runner/core": ["@devagent-runner/core@file:packages/core", { "dependencies": { "@devagent-sdk/types": "file:../../../devagent-sdk/packages/types" } }],
+
+    "@devagent-runner/cli/@devagent-runner/adapters/@devagent-sdk/types": ["@devagent-sdk/types@file:../devagent-sdk/packages/types", {}],
+
+    "@devagent-runner/cli/@devagent-runner/local-runner/@devagent-runner/core": ["@devagent-runner/core@file:packages/core", { "dependencies": { "@devagent-sdk/types": "file:../../../devagent-sdk/packages/types" } }],
 
     "@devagent-runner/cli/@devagent-runner/local-runner/@devagent-sdk/types": ["@devagent-sdk/types@file:../devagent-sdk/packages/types", {}],
 
@@ -102,5 +108,9 @@
     "@devagent-runner/cli/@devagent-sdk/validation/@devagent-sdk/types": ["@devagent-sdk/types@file:../devagent-sdk/packages/types", {}],
 
     "@devagent-runner/local-runner/@devagent-runner/core/@devagent-sdk/types": ["@devagent-sdk/types@file:../devagent-sdk/packages/types", {}],
+
+    "@devagent-runner/cli/@devagent-runner/adapters/@devagent-runner/core/@devagent-sdk/types": ["@devagent-sdk/types@file:../devagent-sdk/packages/types", {}],
+
+    "@devagent-runner/cli/@devagent-runner/local-runner/@devagent-runner/core/@devagent-sdk/types": ["@devagent-sdk/types@file:../devagent-sdk/packages/types", {}],
   }
 }
