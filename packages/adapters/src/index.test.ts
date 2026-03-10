@@ -92,6 +92,44 @@ process.stdout.write(JSON.stringify({ protocolVersion: "0.1", type: "completed",
   assert.deepEqual(events.map((event) => event.type), ["started", "artifact", "completed"]);
 });
 
+test("DevAgentAdapter waits for close before reading result", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "devagent-close-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+const fs = require("fs");
+const path = require("path");
+const args = process.argv.slice(2);
+const requestPath = args[args.indexOf("--request") + 1];
+const artifactDir = args[args.indexOf("--artifact-dir") + 1];
+const request = JSON.parse(fs.readFileSync(requestPath, "utf8"));
+const artifactPath = path.join(artifactDir, "triage-report.md");
+const resultPath = path.join(artifactDir, "result.json");
+process.on("beforeExit", () => {
+  fs.writeFileSync(artifactPath, "# Triage\\n\\nLate output\\n");
+  fs.writeFileSync(resultPath, JSON.stringify({
+    protocolVersion: "0.1",
+    taskId: request.taskId,
+    status: "success",
+    artifacts: [{ kind: "triage-report", path: artifactPath, createdAt: new Date().toISOString() }],
+    metrics: { startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), durationMs: 1 }
+  }, null, 2));
+  process.stdout.write(JSON.stringify({ protocolVersion: "0.1", type: "started", at: new Date().toISOString(), taskId: request.taskId }) + "\\n");
+  process.stdout.write(JSON.stringify({ protocolVersion: "0.1", type: "artifact", at: new Date().toISOString(), taskId: request.taskId, artifact: { kind: "triage-report", path: artifactPath, createdAt: new Date().toISOString() } }) + "\\n");
+  process.stdout.write(JSON.stringify({ protocolVersion: "0.1", type: "completed", at: new Date().toISOString(), taskId: request.taskId, status: "success" }) + "\\n");
+});
+`);
+
+  const { events, result } = await collectEvents(
+    new DevAgentAdapter(`${process.execPath} ${stubPath}`),
+    createRequest("devagent"),
+    workspacePath,
+    artifactDir,
+  );
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(events.map((event) => event.type), ["started", "artifact", "completed"]);
+});
+
 test("DevAgentAdapter reports cancelled runs as cancelled", async () => {
   const { root, artifactDir, workspacePath } = await createWorkspace();
   const stubPath = join(root, "devagent-cancel-stub.js");

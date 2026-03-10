@@ -16,6 +16,17 @@ import type {
 } from "@devagent-sdk/types";
 import { PROTOCOL_VERSION } from "@devagent-sdk/types";
 
+async function waitForFile(path: string, timeoutMs = 500): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (existsSync(path)) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return existsSync(path);
+}
+
 function artifactFileName(kind: ArtifactKind): string {
   switch (kind) {
     case "triage-report":
@@ -243,12 +254,20 @@ class CliPromptAdapter implements ExecutorAdapter {
         reject(new RunnerError("PROCESS_LAUNCH_FAILED", error.message));
       });
 
-      child.once("exit", async (code: number | null, signal: NodeJS.Signals | null) => {
+      let exitCode: number | null = null;
+      let exitSignal: NodeJS.Signals | null = null;
+
+      child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+        exitCode = code;
+        exitSignal = signal;
+      });
+
+      child.once("close", async () => {
         try {
           const body = this.config.parseOutput
             ? await this.config.parseOutput(stdout, artifactDir)
             : stdout || stderr || `Executor ${this.id} completed without output.`;
-          const status = signal === "SIGTERM" ? "cancelled" : code === 0 ? "success" : "failed";
+          const status = exitSignal === "SIGTERM" ? "cancelled" : exitCode === 0 ? "success" : "failed";
           const result = await createFallbackResult(
             request,
             artifactDir,
@@ -345,18 +364,29 @@ export class DevAgentAdapter implements ExecutorAdapter {
 
     const resultPromise = new Promise<TaskExecutionResult>((resolve, reject) => {
       child.once("error", (error: Error) => reject(new RunnerError("PROCESS_LAUNCH_FAILED", error.message)));
-      child.once("exit", async (code: number | null, signal: NodeJS.Signals | null) => {
+      let exitCode: number | null = null;
+      let exitSignal: NodeJS.Signals | null = null;
+
+      child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+        exitCode = code;
+        exitSignal = signal;
+      });
+
+      child.once("close", async () => {
         try {
           const resultPath = join(artifactDir, "result.json");
-          if (!existsSync(resultPath)) {
-            const status = signal === "SIGTERM" ? "cancelled" : "failed";
+          if (!await waitForFile(resultPath)) {
+            const status = exitSignal === "SIGTERM" ? "cancelled" : "failed";
             const fallback = await createFallbackResult(
               request,
               artifactDir,
               status,
               startedAt,
               stderr || "DevAgent did not emit a result file.",
-              errorForStatus(status, signal === "SIGTERM" ? "Cancelled by operator" : (stderr || "Missing result.json")),
+              errorForStatus(
+                status,
+                exitSignal === "SIGTERM" ? "Cancelled by operator" : (stderr || "Missing result.json"),
+              ),
             );
             resolve(fallback);
             return;
