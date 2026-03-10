@@ -1,0 +1,21 @@
+{
+  "name": "@devagent-runner/adapters",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@devagent-runner/core": "file:../core",
+    "@devagent-sdk/types": "file:../../../devagent-sdk/packages/types"
+  },
+  "scripts": {
+    "build": "bunx tsc -p tsconfig.json",
+    "typecheck": "bunx tsc -p tsconfig.json --noEmit"
+  }
+}

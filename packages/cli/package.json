@@ -1,0 +1,19 @@
+{
+  "name": "@devagent-runner/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "devagent-runner": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "dependencies": {
+    "@devagent-runner/adapters": "file:../adapters",
+    "@devagent-runner/local-runner": "file:../local-runner",
+    "@devagent-sdk/validation": "file:../../../devagent-sdk/packages/validation"
+  },
+  "scripts": {
+    "build": "bunx tsc -p tsconfig.json",
+    "typecheck": "bunx tsc -p tsconfig.json --noEmit"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "devagent-runner",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.10",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "bunx tsc -b packages/core packages/local-runner packages/adapters packages/cli",
+    "typecheck": "bunx tsc -b --pretty false packages/core packages/local-runner packages/adapters packages/cli",
+    "test": "bun run build && bun test ./packages/*/dist/*.test.js"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.10",
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.3"
+  }
+}
