@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
-import type { ExecutorAdapter, RunHandle } from "@devagent-runner/core";
-import { RunnerError } from "@devagent-runner/core";
+import type { ExecutorAdapter, RunHandle, RunStatus } from "@devagent-runner/core";
+import { RunnerError, TrackedRunHandle } from "@devagent-runner/core";
+import { validateTaskExecutionEvent, validateTaskExecutionResult } from "@devagent-sdk/validation";
 import type {
   ArtifactKind,
   ArtifactRef,
@@ -19,12 +19,21 @@ import { PROTOCOL_VERSION } from "@devagent-sdk/types";
 async function waitForFile(path: string, timeoutMs = 500): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
-    if (existsSync(path)) {
+    if (await fileExists(path)) {
       return true;
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  return existsSync(path);
+  return fileExists(path);
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function artifactFileName(kind: ArtifactKind): string {
@@ -67,33 +76,17 @@ function artifactTitle(taskType: TaskExecutionRequest["taskType"]): string {
   return taskType[0]!.toUpperCase() + taskType.slice(1);
 }
 
-class ProcessRunHandle implements RunHandle {
-  private currentStatus: "running" | "success" | "failed" | "cancelled" = "running";
-  readonly pid: number | undefined;
-
+class ProcessRunHandle extends TrackedRunHandle {
   constructor(
     readonly id: string,
     private readonly child: ChildProcess,
-    private readonly resultPromise: Promise<TaskExecutionResult>,
+    resultPromise: Promise<TaskExecutionResult>,
   ) {
-    this.pid = child.pid ?? undefined;
-    void this.resultPromise.then((result) => {
-      this.currentStatus = result.status;
-    }).catch(() => {
-      this.currentStatus = "failed";
-    });
-  }
-
-  status(): "running" | "success" | "failed" | "cancelled" {
-    return this.currentStatus;
-  }
-
-  wait(): Promise<TaskExecutionResult> {
-    return this.resultPromise;
+    super(id, child.pid ?? undefined, resultPromise);
   }
 
   async cancel(): Promise<void> {
-    this.currentStatus = "cancelled";
+    this.markCancelled();
     this.child.kill("SIGTERM");
   }
 }
@@ -155,7 +148,7 @@ async function createFallbackResult(
 }
 
 function errorForStatus(
-  status: TaskExecutionResult["status"],
+  status: RunStatus,
   message: string,
 ): TaskExecutionResult["error"] | undefined {
   if (status === "success") {
@@ -335,7 +328,7 @@ export class DevAgentAdapter implements ExecutorAdapter {
       const lines = chunk.toString().split("\n").filter((line: string) => line.trim());
       for (const line of lines) {
         try {
-          onEvent(JSON.parse(line) as TaskExecutionEvent);
+          onEvent(validateTaskExecutionEvent(JSON.parse(line)));
         } catch {
           onEvent({
             protocolVersion: PROTOCOL_VERSION,
@@ -364,11 +357,9 @@ export class DevAgentAdapter implements ExecutorAdapter {
 
     const resultPromise = new Promise<TaskExecutionResult>((resolve, reject) => {
       child.once("error", (error: Error) => reject(new RunnerError("PROCESS_LAUNCH_FAILED", error.message)));
-      let exitCode: number | null = null;
       let exitSignal: NodeJS.Signals | null = null;
 
-      child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
-        exitCode = code;
+      child.once("exit", (_code: number | null, signal: NodeJS.Signals | null) => {
         exitSignal = signal;
       });
 
@@ -376,7 +367,7 @@ export class DevAgentAdapter implements ExecutorAdapter {
         try {
           const resultPath = join(artifactDir, "result.json");
           if (!await waitForFile(resultPath)) {
-            const status = exitSignal === "SIGTERM" ? "cancelled" : "failed";
+            const status: RunStatus = exitSignal === "SIGTERM" ? "cancelled" : "failed";
             const fallback = await createFallbackResult(
               request,
               artifactDir,
@@ -388,10 +379,34 @@ export class DevAgentAdapter implements ExecutorAdapter {
                 exitSignal === "SIGTERM" ? "Cancelled by operator" : (stderr || "Missing result.json"),
               ),
             );
+            if (status === "failed") {
+              onEvent({
+                protocolVersion: PROTOCOL_VERSION,
+                type: "log",
+                at: new Date().toISOString(),
+                taskId: request.taskId,
+                stream: "stderr",
+                message: stderr || "DevAgent did not emit result.json",
+              } as TaskExecutionEvent);
+              onEvent({
+                protocolVersion: PROTOCOL_VERSION,
+                type: "artifact",
+                at: new Date().toISOString(),
+                taskId: request.taskId,
+                artifact: fallback.artifacts[0]!,
+              } as TaskExecutionEvent);
+              onEvent({
+                protocolVersion: PROTOCOL_VERSION,
+                type: "completed",
+                at: new Date().toISOString(),
+                taskId: request.taskId,
+                status,
+              } as TaskExecutionEvent);
+            }
             resolve(fallback);
             return;
           }
-          const parsed = JSON.parse(await readFile(resultPath, "utf-8")) as TaskExecutionResult;
+          const parsed = validateTaskExecutionResult(JSON.parse(await readFile(resultPath, "utf-8")));
           resolve(parsed);
         } catch (error) {
           reject(error);
@@ -421,7 +436,7 @@ export class CodexAdapter extends CliPromptAdapter {
       ],
       parseOutput: async (stdout, artifactDir) => {
         const lastMessagePath = join(artifactDir, "last-message.txt");
-        if (existsSync(lastMessagePath)) {
+        if (await fileExists(lastMessagePath)) {
           return readFile(lastMessagePath, "utf-8");
         }
         return stdout;

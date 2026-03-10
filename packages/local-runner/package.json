@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@devagent-runner/core": "file:../core",
+    "@devagent-sdk/validation": "file:../../../devagent-sdk/packages/validation",
     "@devagent-sdk/types": "file:../../../devagent-sdk/packages/types"
   },
   "scripts": {

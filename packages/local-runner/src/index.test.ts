@@ -1,4 +1,3 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { join } from "node:path";
@@ -9,6 +8,7 @@ import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import type { ExecutorAdapter, RunHandle } from "@devagent-runner/core";
+import { test } from "vitest";
 import type {
   ArtifactRef,
   TaskExecutionEvent,
@@ -367,6 +367,23 @@ test("local runner supports cancellation from a fresh process instance", async (
   assert.equal(result.status, "cancelled");
 });
 
+test("local runner reports inactive cancellations as invalid requests", async () => {
+  const repo = await createRepo();
+  const runner = new LocalRunner({
+    adapters: [new ContractFakeAdapter()],
+  });
+  const { runId } = await runner.startTask(createRequest(repo, "task-inactive-cancel"));
+  await runner.awaitResult(runId);
+
+  await assert.rejects(
+    () => runner.cancel(runId),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "INVALID_REQUEST");
+      return true;
+    },
+  );
+});
+
 test("local runner fails a run that exceeds timeoutSec", async () => {
   const repo = await createRepo();
   const runner = new LocalRunner({
@@ -402,4 +419,32 @@ test("local runner reads finished runs from persisted metadata", async () => {
 
   assert.equal(metadata.taskId, "task-persisted");
   assert.equal(result.status, "success");
+});
+
+test("local runner rejects invalid persisted results", async () => {
+  const repo = await createRepo();
+  const runner = new LocalRunner({
+    adapters: [new ContractFakeAdapter()],
+  });
+  const { runId } = await runner.startTask(createRequest(repo, "task-invalid-result"));
+  await runner.awaitResult(runId);
+  const metadata = await runner.inspect(runId);
+  await writeFile(metadata.resultPath, JSON.stringify({ nope: true }, null, 2));
+
+  const restored = new LocalRunner({
+    adapters: [new ContractFakeAdapter()],
+  });
+  const previousCwd = process.cwd();
+  process.chdir(repo);
+  await assert.rejects(() => restored.awaitResult(runId));
+  process.chdir(previousCwd);
+});
+
+test("readEventLog rejects invalid protocol events", async () => {
+  const repo = await createRepo();
+  const eventLogPath = join(repo, ".devagent-runner", "events", "invalid.jsonl");
+  await mkdir(join(repo, ".devagent-runner", "events"), { recursive: true });
+  await writeFile(eventLogPath, `${JSON.stringify({ nope: true })}\n`);
+
+  await assert.rejects(() => readEventLog(eventLogPath));
 });

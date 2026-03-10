@@ -15,9 +15,40 @@ export interface WorkspaceManager {
 
 export interface RunHandle {
   readonly id: string;
+  readonly pid?: number;
   status(): RunStatus;
   wait(): Promise<TaskExecutionResult>;
   cancel(): Promise<void>;
+}
+
+export abstract class TrackedRunHandle implements RunHandle {
+  private currentStatus: RunStatus = "running";
+
+  constructor(
+    readonly id: string,
+    readonly pid: number | undefined,
+    private readonly resultPromise: Promise<TaskExecutionResult>,
+  ) {
+    void this.resultPromise.then((result) => {
+      this.currentStatus = result.status;
+    }).catch(() => {
+      this.currentStatus = "failed";
+    });
+  }
+
+  status(): RunStatus {
+    return this.currentStatus;
+  }
+
+  wait(): Promise<TaskExecutionResult> {
+    return this.resultPromise;
+  }
+
+  protected markCancelled(): void {
+    this.currentStatus = "cancelled";
+  }
+
+  abstract cancel(): Promise<void>;
 }
 
 export interface ExecutorAdapter {
