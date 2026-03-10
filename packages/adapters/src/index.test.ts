@@ -1,8 +1,8 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { chmod, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { test } from "vitest";
 import {
   ClaudeAdapter,
   CodexAdapter,
@@ -153,6 +153,28 @@ setTimeout(() => process.exit(0), 10000);
   assert.equal(result.status, "cancelled");
   assert.equal(result.error?.code, "CANCELLED");
   assert.equal(events.length, 0);
+});
+
+test("DevAgentAdapter emits failure events when result.json is missing", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "devagent-missing-result-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+process.stderr.write("result file was never written\\n");
+process.exit(1);
+`);
+
+  const { events, result } = await collectEvents(
+    new DevAgentAdapter(`${process.execPath} ${stubPath}`),
+    createRequest("devagent"),
+    workspacePath,
+    artifactDir,
+  );
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.error?.code, "EXECUTION_FAILED");
+  assert.deepEqual(events.map((event) => event.type), ["log", "log", "artifact", "completed"]);
+  assert.equal(events[0]?.type, "log");
+  assert.match(events[0]?.type === "log" ? events[0].message : "", /result file was never written/);
 });
 
 test("CodexAdapter smoke test with stub executable", async () => {

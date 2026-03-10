@@ -9,11 +9,19 @@
   "scripts": {
     "build": "bunx tsc -b packages/core packages/local-runner packages/adapters packages/cli",
     "typecheck": "bunx tsc -b --pretty false packages/core packages/local-runner packages/adapters packages/cli",
-    "test": "bun run build && bun test ./packages/*/dist/*.test.js"
+    "test": "bun run build && node ./node_modules/vitest/vitest.mjs run --config vitest.config.ts",
+    "lint": "bunx eslint packages/"
   },
   "devDependencies": {
+    "@devagent-sdk/schema": "file:../devagent-sdk/packages/schema",
+    "@devagent-sdk/types": "file:../devagent-sdk/packages/types",
+    "@devagent-sdk/validation": "file:../devagent-sdk/packages/validation",
+    "@eslint/js": "^10.0.1",
     "@types/bun": "^1.3.10",
     "@types/node": "^24.3.0",
-    "typescript": "^5.9.3"
+    "eslint": "^10.0.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.1",
+    "vitest": "^3.2.4"
   }
 }

@@ -1,16 +1,17 @@
 import { EventEmitter } from "node:events";
-import { mkdir, readFile, rm, writeFile, cp, stat, readdir, symlink, lstat } from "node:fs/promises";
-import { appendFileSync, existsSync } from "node:fs";
+import { appendFile, mkdir, readFile, rm, writeFile, cp, stat, readdir, symlink, lstat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
-import type { ChildProcess } from "node:child_process";
 import {
   type ExecutorAdapter,
   type RunHandle,
+  type RunStatus,
   type RunnerClient,
   type WorkspaceManager,
   RunnerError,
+  TrackedRunHandle,
 } from "@devagent-runner/core";
+import { validateTaskExecutionEvent, validateTaskExecutionResult } from "@devagent-sdk/validation";
 import type {
   TaskExecutionEvent,
   TaskExecutionRequest,
@@ -23,7 +24,7 @@ type RunMetadata = {
   runId: string;
   taskId: string;
   taskType: string;
-  status: "running" | "success" | "failed" | "cancelled";
+  status: RunStatus;
   artifactDir: string;
   eventLogPath: string;
   workspacePath: string;
@@ -42,17 +43,17 @@ function workspaceRootFor(repoPath: string): string {
 }
 
 async function isGitRepo(path: string): Promise<boolean> {
-  return existsSync(join(path, ".git"));
+  return fileExists(join(path, ".git"));
 }
 
 async function execFileAsync(command: string, args: string[], cwd: string): Promise<void> {
-  await new Promise<void>((resolvePromise, rejectPromise) => {
+  await new Promise<void>((resolve, reject) => {
     execFile(command, args, { cwd }, (error) => {
       if (error) {
-        rejectPromise(error);
+        reject(error);
         return;
       }
-      resolvePromise();
+      resolve();
     });
   });
 }
@@ -67,13 +68,13 @@ async function branchExists(repoPath: string, branch: string): Promise<boolean> 
 }
 
 async function execFileStdout(command: string, args: string[], cwd: string): Promise<string> {
-  return await new Promise<string>((resolvePromise, rejectPromise) => {
+  return await new Promise<string>((resolve, reject) => {
     execFile(command, args, { cwd, encoding: "utf-8" }, (error, stdout) => {
       if (error) {
-        rejectPromise(error);
+        reject(error);
         return;
       }
-      resolvePromise(stdout);
+      resolve(stdout);
     });
   });
 }
@@ -83,7 +84,7 @@ async function ignoreWorkspaceEntry(workspacePath: string, entry: string): Promi
     const rawExcludePath = (await execFileStdout("git", ["rev-parse", "--git-path", "info/exclude"], workspacePath)).trim();
     const excludePath = isAbsolute(rawExcludePath) ? rawExcludePath : join(workspacePath, rawExcludePath);
     await mkdir(dirname(excludePath), { recursive: true });
-    const current = existsSync(excludePath) ? await readFile(excludePath, "utf-8") : "";
+    const current = await fileExists(excludePath) ? await readFile(excludePath, "utf-8") : "";
     const lines = current.split("\n").map((line) => line.trim()).filter(Boolean);
     if (lines.includes(entry) || lines.includes(`/${entry}`)) {
       return;
@@ -133,7 +134,7 @@ async function overlayGitWorkingTreeChanges(sourceRepoPath: string, workspacePat
 async function linkSharedDependencies(sourceRepoPath: string, workspacePath: string): Promise<void> {
   const sourceNodeModules = join(sourceRepoPath, "node_modules");
   const workspaceNodeModules = join(workspacePath, "node_modules");
-  if (!existsSync(sourceNodeModules) || existsSync(workspaceNodeModules)) {
+  if (!await fileExists(sourceNodeModules) || await fileExists(workspaceNodeModules)) {
     return;
   }
 
@@ -176,7 +177,7 @@ export class FileSystemWorkspaceManager implements WorkspaceManager {
     const workspacesRoot = join(runnerRoot, "workspaces");
     const workspacePath = join(workspacesRoot, safeWorkspaceName(spec.workBranch));
     await mkdir(workspacesRoot, { recursive: true });
-    if (existsSync(workspacePath)) {
+    if (await fileExists(workspacePath)) {
       return { workspacePath };
     }
 
@@ -203,7 +204,7 @@ export class FileSystemWorkspaceManager implements WorkspaceManager {
 
   async cleanup(workspacePath: string): Promise<void> {
     const gitDir = join(workspacePath, ".git");
-    if (existsSync(gitDir)) {
+    if (await fileExists(gitDir)) {
       try {
         await execFileAsync("git", ["worktree", "remove", "--force", workspacePath], workspacePath);
         return;
@@ -215,27 +216,13 @@ export class FileSystemWorkspaceManager implements WorkspaceManager {
   }
 }
 
-class LocalRunHandle implements RunHandle {
-  private currentStatus: "running" | "success" | "failed" | "cancelled" = "running";
-
+class LocalRunHandle extends TrackedRunHandle {
   constructor(
     readonly id: string,
-    private readonly resultPromise: Promise<TaskExecutionResult>,
+    resultPromise: Promise<TaskExecutionResult>,
     private readonly cancelFn: () => Promise<void>,
   ) {
-    void this.resultPromise.then((result) => {
-      this.currentStatus = result.status;
-    }).catch(() => {
-      this.currentStatus = "failed";
-    });
-  }
-
-  status(): "running" | "success" | "failed" | "cancelled" {
-    return this.currentStatus;
-  }
-
-  wait(): Promise<TaskExecutionResult> {
-    return this.resultPromise;
+    super(id, undefined, resultPromise);
   }
 
   cancel(): Promise<void> {
@@ -272,9 +259,11 @@ export class LocalRunner implements RunnerClient {
     await mkdir(runsDir, { recursive: true });
     const eventLogPath = join(eventsDir, `${request.taskId}.jsonl`);
     const resultPath = join(artifactDir, "result.json");
+    let eventLogWrite = Promise.resolve();
+    let eventLogError: unknown;
 
     const emitter = new EventEmitter();
-    let workspacePath = "";
+    let workspacePath: string;
     try {
       ({ workspacePath } = await this.workspaceManager.prepare(request.workspace));
     } catch (error) {
@@ -282,8 +271,21 @@ export class LocalRunner implements RunnerClient {
     }
 
     const onEvent = (event: TaskExecutionEvent): void => {
-      appendFileSync(eventLogPath, `${JSON.stringify(event)}\n`);
+      eventLogWrite = eventLogWrite
+        .then(async () => {
+          await appendFile(eventLogPath, `${JSON.stringify(event)}\n`);
+        })
+        .catch((error: unknown) => {
+          eventLogError ??= error;
+        });
       emitter.emit("event", event);
+    };
+
+    const flushEventLog = async (): Promise<void> => {
+      await eventLogWrite;
+      if (eventLogError) {
+        throw eventLogError;
+      }
     };
 
     const handle = await adapter.launch(request, workspacePath, artifactDir, onEvent);
@@ -295,7 +297,7 @@ export class LocalRunner implements RunnerClient {
       artifactDir,
       eventLogPath,
       workspacePath,
-      pid: (handle as RunHandle & { pid?: number }).pid,
+      pid: handle.pid,
       resultPath,
     };
     await writeFile(join(runsDir, `${handle.id}.json`), JSON.stringify(metadata, null, 2));
@@ -331,6 +333,7 @@ export class LocalRunner implements RunnerClient {
       handle.id,
       Promise.race([resultPromise, ...(timedPromise ? [timedPromise] : [])]).then(async (result: TaskExecutionResult) => {
         metadata.status = result.status;
+        await flushEventLog();
         await writeFile(resultPath, JSON.stringify(result, null, 2));
         await writeFile(join(runsDir, `${handle.id}.json`), JSON.stringify(metadata, null, 2));
         this.activeRuns.delete(handle.id);
@@ -360,10 +363,8 @@ export class LocalRunner implements RunnerClient {
     }
 
     const metadata = await this.inspect(runId);
-    const contents = await readFile(metadata.eventLogPath, "utf-8");
-    for (const line of contents.split("\n")) {
-      if (!line.trim()) continue;
-      onEvent(JSON.parse(line) as TaskExecutionEvent);
+    for (const event of await readEventLog(metadata.eventLogPath)) {
+      onEvent(event);
     }
   }
 
@@ -372,7 +373,7 @@ export class LocalRunner implements RunnerClient {
     if (!run) {
       const metadata = await this.inspect(runId);
       if (metadata.status !== "running" || !metadata.pid) {
-        throw new RunnerError("CANCELLED", `Run ${runId} is not active`);
+        throw new RunnerError("INVALID_REQUEST", `Run ${runId} is not active`);
       }
       try {
         process.kill(metadata.pid, "SIGTERM");
@@ -380,10 +381,10 @@ export class LocalRunner implements RunnerClient {
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code === "ESRCH") {
-          throw new RunnerError("CANCELLED", `Run ${runId} is not active`);
+          throw new RunnerError("INVALID_REQUEST", `Run ${runId} is not active`);
         }
         throw new RunnerError(
-          "CANCELLED",
+          "EXECUTION_FAILED",
           error instanceof Error ? error.message : `Unable to cancel run ${runId}`,
         );
       }
@@ -398,7 +399,7 @@ export class LocalRunner implements RunnerClient {
     }
     const metadata = await this.inspect(runId);
     const resultRaw = await readFile(metadata.resultPath, "utf-8");
-    return JSON.parse(resultRaw) as TaskExecutionResult;
+    return validateTaskExecutionResult(JSON.parse(resultRaw));
   }
 
   async inspect(runId: string): Promise<RunMetadata> {
@@ -409,7 +410,7 @@ export class LocalRunner implements RunnerClient {
 
     const cwdGuess = process.cwd();
     const candidate = join(workspaceRootFor(cwdGuess), "runs", `${runId}.json`);
-    if (!existsSync(candidate)) {
+    if (!await fileExists(candidate)) {
       throw new RunnerError("INVALID_REQUEST", `Unknown run ${runId}`);
     }
     return JSON.parse(await readFile(candidate, "utf-8")) as RunMetadata;
@@ -422,12 +423,12 @@ export class LocalRunner implements RunnerClient {
 }
 
 export async function readEventLog(eventLogPath: string): Promise<TaskExecutionEvent[]> {
-  if (!existsSync(eventLogPath)) return [];
+  if (!await fileExists(eventLogPath)) return [];
   const raw = await readFile(eventLogPath, "utf-8");
   return raw
     .split("\n")
     .filter((line: string) => line.trim())
-    .map((line: string) => JSON.parse(line) as TaskExecutionEvent);
+    .map((line: string) => validateTaskExecutionEvent(JSON.parse(line)));
 }
 
 export async function fileExists(path: string): Promise<boolean> {
