@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { mkdir, readFile, rm, writeFile, cp, stat, readdir, symlink, lstat } from "node:fs/promises";
 import { appendFileSync, existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import {
@@ -77,6 +77,23 @@ async function execFileStdout(command: string, args: string[], cwd: string): Pro
   });
 }
 
+async function ignoreWorkspaceEntry(workspacePath: string, entry: string): Promise<void> {
+  try {
+    const rawExcludePath = (await execFileStdout("git", ["rev-parse", "--git-path", "info/exclude"], workspacePath)).trim();
+    const excludePath = isAbsolute(rawExcludePath) ? rawExcludePath : join(workspacePath, rawExcludePath);
+    await mkdir(dirname(excludePath), { recursive: true });
+    const current = existsSync(excludePath) ? await readFile(excludePath, "utf-8") : "";
+    const lines = current.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (lines.includes(entry) || lines.includes(`/${entry}`)) {
+      return;
+    }
+    const next = current.endsWith("\n") || current.length === 0 ? `${current}/${entry}\n` : `${current}\n/${entry}\n`;
+    await writeFile(excludePath, next);
+  } catch {
+    // Temp copies or non-git workspaces do not need git excludes.
+  }
+}
+
 async function copyRepoContents(sourceRepoPath: string, workspacePath: string): Promise<void> {
   await mkdir(workspacePath, { recursive: true });
   for (const entry of await readdir(sourceRepoPath)) {
@@ -126,6 +143,7 @@ async function linkSharedDependencies(sourceRepoPath: string, workspacePath: str
 
   const relativeTarget = resolve(sourceNodeModules);
   await symlink(relativeTarget, workspaceNodeModules, "dir");
+  await ignoreWorkspaceEntry(workspacePath, "node_modules");
 }
 
 function safeWorkspaceName(workBranch: string): string {

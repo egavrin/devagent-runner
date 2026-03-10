@@ -250,6 +250,27 @@ test("workspace manager links node_modules into prepared workspaces when availab
   await manager.cleanup(workspacePath);
 });
 
+test("workspace manager ignores linked node_modules in git workspaces", async () => {
+  const repo = await createRealGitRepo();
+  await mkdir(join(repo, "node_modules"), { recursive: true });
+  await writeFile(join(repo, "node_modules", ".placeholder"), "ok\n");
+  const manager = new FileSystemWorkspaceManager();
+
+  const { workspacePath } = await manager.prepare({
+    sourceRepoPath: repo,
+    workBranch: "devagent/workflow/node-modules-ignore",
+    isolation: "git-worktree",
+    baseRef: "main",
+  });
+
+  const status = execFileSync("git", ["status", "--short"], {
+    cwd: workspacePath,
+    encoding: "utf-8",
+  }).trim();
+  assert.equal(status, "");
+  await manager.cleanup(workspacePath);
+});
+
 test("workspace manager reopens an existing git branch without resetting it", async () => {
   const repo = await createRealGitRepo();
   const manager = new FileSystemWorkspaceManager();
