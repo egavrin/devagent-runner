@@ -247,10 +247,11 @@ test("workspace manager links node_modules into prepared workspaces when availab
 
   assert.equal(await fileExists(join(workspacePath, "node_modules")), true);
   assert.equal(await readFile(join(workspacePath, "node_modules", ".placeholder"), "utf-8"), "ok\n");
+  assert.equal(existsSync(join(workspacePath, "node_modules", ".placeholder")), true);
   await manager.cleanup(workspacePath);
 });
 
-test("workspace manager ignores linked node_modules in git workspaces", async () => {
+test("workspace manager exposes node_modules entries inside git workspaces", async () => {
   const repo = await createRealGitRepo();
   await mkdir(join(repo, "node_modules"), { recursive: true });
   await writeFile(join(repo, "node_modules", ".placeholder"), "ok\n");
@@ -268,6 +269,7 @@ test("workspace manager ignores linked node_modules in git workspaces", async ()
     encoding: "utf-8",
   }).trim();
   assert.equal(status, "");
+  assert.equal(await readFile(join(workspacePath, "node_modules", ".placeholder"), "utf-8"), "ok\n");
   await manager.cleanup(workspacePath);
 });
 

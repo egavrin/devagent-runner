@@ -143,8 +143,15 @@ async function linkSharedDependencies(sourceRepoPath: string, workspacePath: str
     return;
   }
 
-  const relativeTarget = resolve(sourceNodeModules);
-  await symlink(relativeTarget, workspaceNodeModules, "dir");
+  await mkdir(workspaceNodeModules, { recursive: true });
+  for (const entry of await readdir(sourceNodeModules)) {
+    const sourceEntry = join(sourceNodeModules, entry);
+    const workspaceEntry = join(workspaceNodeModules, entry);
+    if (await fileExists(workspaceEntry)) {
+      continue;
+    }
+    await symlink(resolve(sourceEntry), workspaceEntry, "junction");
+  }
   await ignoreWorkspaceEntry(workspacePath, "node_modules");
 }
 
