@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { chmod, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { test } from "vitest";
+import { afterEach, test } from "vitest";
 import {
   ClaudeAdapter,
   CodexAdapter,
@@ -22,7 +22,10 @@ async function createWorkspace(): Promise<{ root: string; artifactDir: string; w
   return { root, artifactDir, workspacePath };
 }
 
-function createRequest(executorId: TaskExecutionRequest["executor"]["executorId"]): TaskExecutionRequest {
+function createRequest(
+  executorId: TaskExecutionRequest["executor"]["executorId"],
+  options: { model?: string; provider?: string; readOnly?: boolean } = {},
+): TaskExecutionRequest {
   return {
     protocolVersion: PROTOCOL_VERSION,
     taskId: `task-${executorId}`,
@@ -33,13 +36,22 @@ function createRequest(executorId: TaskExecutionRequest["executor"]["executorId"
       sourceRepoPath: "/tmp/repo",
       workBranch: `devagent/${executorId}/task`,
       isolation: "temp-copy",
+      readOnly: options.readOnly,
     },
-    executor: { executorId, model: "test-model" },
+    executor: {
+      executorId,
+      model: options.model ?? "test-model",
+      provider: options.provider,
+    },
     constraints: {},
     context: { summary: "smoke" },
     expectedArtifacts: ["triage-report"],
   };
 }
+
+afterEach(() => {
+  delete process.env.DEVAGENT_RUNNER_CODEX_BIN;
+});
 
 async function createStub(path: string, contents: string): Promise<void> {
   await writeFile(path, contents);
@@ -185,18 +197,22 @@ const fs = require("fs");
 const args = process.argv.slice(2);
 const outIndex = args.indexOf("-o");
 if (outIndex >= 0) fs.writeFileSync(args[outIndex + 1], "stub codex output\\n");
-process.stdout.write("{\\"type\\":\\"result\\",\\"message\\":\\"ok\\"}\\n");
+process.stdout.write("{\\"type\\":\\"thread.started\\"}\\n");
+process.stdout.write("{\\"type\\":\\"turn.started\\"}\\n");
+process.stdout.write("{\\"type\\":\\"item.completed\\",\\"item\\":{\\"type\\":\\"agent_message\\",\\"text\\":\\"stub codex output\\"}}\\n");
+process.stdout.write("{\\"type\\":\\"turn.completed\\"}\\n");
 `);
 
+  process.env.DEVAGENT_RUNNER_CODEX_BIN = `${process.execPath} ${stubPath}`;
   const { events, result } = await collectEvents(
-    new CodexAdapter(`${process.execPath} ${stubPath}`),
+    new CodexAdapter(),
     createRequest("codex"),
     workspacePath,
     artifactDir,
   );
 
   assert.equal(result.status, "success");
-  assert.equal(events.at(-1)?.type, "completed");
+  assert.deepEqual(events.map((event) => event.type), ["started", "progress", "progress", "progress", "progress"]);
   assert.match(await readFile(join(artifactDir, "triage-report.md"), "utf8"), /stub codex output/);
 });
 
@@ -204,7 +220,8 @@ test("ClaudeAdapter smoke test with stub executable", async () => {
   const { root, artifactDir, workspacePath } = await createWorkspace();
   const stubPath = join(root, "claude-stub.js");
   await createStub(stubPath, `#!/usr/bin/env node
-process.stdout.write("claude stub output\\n");
+process.stdout.write(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "claude stub output" }] } }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", result: "claude stub output" }) + "\\n");
 `);
 
   const { events, result } = await collectEvents(
@@ -215,23 +232,128 @@ process.stdout.write("claude stub output\\n");
   );
 
   assert.equal(result.status, "success");
-  assert.equal(events.at(-1)?.type, "completed");
+  assert.deepEqual(events.map((event) => event.type), ["started", "progress", "progress"]);
+  assert.match(await readFile(join(artifactDir, "triage-report.md"), "utf8"), /claude stub output/);
 });
 
 test("OpenCodeAdapter smoke test with stub executable", async () => {
   const { root, artifactDir, workspacePath } = await createWorkspace();
   const stubPath = join(root, "opencode-stub.js");
   await createStub(stubPath, `#!/usr/bin/env node
-process.stdout.write("opencode stub output\\n");
+const args = process.argv.slice(2);
+const agentIndex = args.indexOf("--agent");
+if (agentIndex === -1 || args[agentIndex + 1] !== "build") {
+  throw new Error("expected build agent");
+}
+const permissions = process.env.OPENCODE_PERMISSION || "";
+if (!permissions.includes('"*":"deny"') || !permissions.includes('"read":"allow"') || !permissions.includes('"edit":"deny"') || !permissions.includes('"write":"deny"')) {
+  throw new Error("expected read-only permissions");
+}
+if (process.argv.includes("--model")) {
+  throw new Error("unexpected --model flag");
+}
+process.stdout.write(JSON.stringify({ type: "step_start", part: { type: "step-start" } }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "text", part: { type: "text", text: "opencode stub output" } }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-finish" } }) + "\\n");
 `);
 
   const { events, result } = await collectEvents(
+    new OpenCodeAdapter(`${process.execPath} ${stubPath}`),
+    createRequest("opencode", { readOnly: true }),
+    workspacePath,
+    artifactDir,
+  );
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(events.map((event) => event.type), ["started", "progress", "progress", "progress"]);
+  assert.match(await readFile(join(artifactDir, "triage-report.md"), "utf8"), /opencode stub output/);
+});
+
+test("OpenCodeAdapter passes provider-qualified model names through", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "opencode-model-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const modelIndex = args.indexOf("--model");
+if (modelIndex === -1 || args[modelIndex + 1] !== "opencode/big-pickle") {
+  throw new Error("expected provider-qualified --model");
+}
+process.stdout.write(JSON.stringify({ type: "text", part: { type: "text", text: "opencode model output" } }) + "\\n");
+`);
+
+  const { result } = await collectEvents(
+    new OpenCodeAdapter(`${process.execPath} ${stubPath}`),
+    createRequest("opencode", { provider: "opencode", model: "big-pickle" }),
+    workspacePath,
+    artifactDir,
+  );
+
+  assert.equal(result.status, "success");
+  assert.match(await readFile(join(artifactDir, "triage-report.md"), "utf8"), /opencode model output/);
+});
+
+test("OpenCodeAdapter surfaces structured errors without mislabeling them as permissions", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "opencode-error-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({
+  type: "error",
+  error: { data: { message: "Model not found: opencode/missing-model" } }
+}) + "\\n");
+process.exit(1);
+`);
+
+  const { result } = await collectEvents(
     new OpenCodeAdapter(`${process.execPath} ${stubPath}`),
     createRequest("opencode"),
     workspacePath,
     artifactDir,
   );
 
+  assert.equal(result.status, "failed");
+  assert.equal(result.error?.message, "Model not found: opencode/missing-model");
+});
+
+test("ClaudeAdapter fails when no final assistant text is produced", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "claude-empty-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", result: "" }) + "\\n");
+`);
+
+  const { result } = await collectEvents(
+    new ClaudeAdapter(`${process.execPath} ${stubPath}`),
+    createRequest("claude"),
+    workspacePath,
+    artifactDir,
+  );
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.artifacts.length, 0);
+});
+
+test("ClaudeAdapter captures plan-mode file output when no final assistant text is emitted", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "claude-plan-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({
+  type: "user",
+  tool_use_result: {
+    type: "create",
+    filePath: "/Users/test/.claude/plans/example-plan.md",
+    content: "# Example Plan\\n\\nExecutor claude handled task type plan."
+  }
+}) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", result: "" }) + "\\n");
+`);
+
+  const { result } = await collectEvents(
+    new ClaudeAdapter(`${process.execPath} ${stubPath}`),
+    createRequest("claude", { readOnly: true }),
+    workspacePath,
+    artifactDir,
+  );
+
   assert.equal(result.status, "success");
-  assert.equal(events.at(-1)?.type, "completed");
+  assert.match(await readFile(join(artifactDir, "triage-report.md"), "utf8"), /Example Plan/);
 });

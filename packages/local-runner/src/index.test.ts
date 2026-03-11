@@ -145,6 +145,68 @@ class OrderedFakeAdapter implements ExecutorAdapter {
 
 class ContractFakeAdapter extends OrderedFakeAdapter {}
 
+class RunnerFinalizedAdapter implements ExecutorAdapter {
+  constructor(private readonly mutateWorkspace = false) {}
+
+  executorId(): string {
+    return "codex";
+  }
+
+  canHandle(): boolean {
+    return true;
+  }
+
+  handlesFinalEvents(): boolean {
+    return false;
+  }
+
+  async launch(
+    request: TaskExecutionRequest,
+    workspacePath: string,
+    artifactDir: string,
+    onEvent: (event: TaskExecutionEvent) => void,
+  ): Promise<RunHandle> {
+    onEvent({
+      protocolVersion: PROTOCOL_VERSION,
+      type: "started",
+      at: new Date().toISOString(),
+      taskId: request.taskId,
+    });
+    onEvent({
+      protocolVersion: PROTOCOL_VERSION,
+      type: "progress",
+      at: new Date().toISOString(),
+      taskId: request.taskId,
+      message: "runner finalized adapter in progress",
+    });
+
+    const result = (async (): Promise<TaskExecutionResult> => {
+      if (this.mutateWorkspace) {
+        await writeFile(join(workspacePath, "README.md"), "mutated\n");
+      }
+      const artifactPath = join(artifactDir, "triage-report.md");
+      await writeFile(artifactPath, "# Triage\n\nRunner finalized output\n");
+      return {
+        protocolVersion: PROTOCOL_VERSION,
+        taskId: request.taskId,
+        status: "success",
+        artifacts: [{
+          kind: "triage-report",
+          path: artifactPath,
+          createdAt: new Date().toISOString(),
+        }],
+        metrics: {
+          startedAt: new Date().toISOString(),
+          finishedAt: new Date().toISOString(),
+          durationMs: 1,
+        },
+      };
+    })();
+
+    return new StaticHandle("run-runner-finalized", result);
+  }
+}
+
 class SleepHandle implements RunHandle {
   private readonly done = new EventEmitter();
   private resolved = false;
@@ -449,4 +511,36 @@ test("readEventLog rejects invalid protocol events", async () => {
   await writeFile(eventLogPath, `${JSON.stringify({ nope: true })}\n`);
 
   await assert.rejects(() => readEventLog(eventLogPath));
+});
+
+test("local runner finalizes artifact and completed events for structured adapters", async () => {
+  const repo = await createRepo();
+  const runner = new LocalRunner({
+    adapters: [new RunnerFinalizedAdapter()],
+  });
+  const request = createRequest(repo, "task-structured-events");
+  request.executor.executorId = "codex";
+
+  const { runId } = await runner.startTask(request);
+  await runner.awaitResult(runId);
+  const metadata = await runner.inspect(runId);
+  const events = await readEventLog(metadata.eventLogPath);
+
+  assert.deepEqual(events.map((event) => event.type), ["started", "progress", "artifact", "completed"]);
+});
+
+test("local runner fails non-devagent executors that modify read-only workspaces", async () => {
+  const repo = await createRepo();
+  const runner = new LocalRunner({
+    adapters: [new RunnerFinalizedAdapter(true)],
+  });
+  const request = createRequest(repo, "task-readonly-violation");
+  request.executor.executorId = "codex";
+  request.workspace.readOnly = true;
+
+  const { runId } = await runner.startTask(request);
+  const result = await runner.awaitResult(runId);
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.error?.message, "Executor codex modified a read-only workspace.");
 });

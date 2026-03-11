@@ -1,7 +1,8 @@
 import { EventEmitter } from "node:events";
-import { appendFile, mkdir, readFile, rm, writeFile, cp, stat, readdir, symlink, lstat } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm, writeFile, cp, stat, readdir, symlink, lstat, readlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   type ExecutorAdapter,
   type RunHandle,
@@ -178,6 +179,59 @@ function createTimeoutResult(request: TaskExecutionRequest, startedAt: string): 
   };
 }
 
+async function fingerprintWorkspace(path: string): Promise<string> {
+  const hash = createHash("sha256");
+
+  async function visit(currentPath: string, relativePath: string): Promise<void> {
+    const stats = await lstat(currentPath);
+    if (stats.isSymbolicLink()) {
+      hash.update(`link:${relativePath}:${await readLinkSafe(currentPath)}\n`);
+      return;
+    }
+
+    if (stats.isDirectory()) {
+      const entries = (await readdir(currentPath)).sort();
+      for (const entry of entries) {
+        if (entry === ".git" || entry === ".devagent-runner" || entry === "node_modules") {
+          continue;
+        }
+        const childRelative = relativePath ? `${relativePath}/${entry}` : entry;
+        await visit(join(currentPath, entry), childRelative);
+      }
+      return;
+    }
+
+    hash.update(`file:${relativePath}\n`);
+    hash.update(await readFile(currentPath));
+    hash.update("\n");
+  }
+
+  await visit(path, "");
+  return hash.digest("hex");
+}
+
+async function readLinkSafe(path: string): Promise<string> {
+  try {
+    return await readlink(path);
+  } catch {
+    return "";
+  }
+}
+
+function enforceReadOnlyResult(
+  request: TaskExecutionRequest,
+  result: TaskExecutionResult,
+): TaskExecutionResult {
+  return {
+    ...result,
+    status: "failed",
+    error: {
+      code: "EXECUTION_FAILED",
+      message: `Executor ${request.executor.executorId} modified a read-only workspace.`,
+    },
+  };
+}
+
 export class FileSystemWorkspaceManager implements WorkspaceManager {
   async prepare(spec: WorkspaceSpec): Promise<{ workspacePath: string }> {
     const runnerRoot = workspaceRootFor(spec.sourceRepoPath);
@@ -276,6 +330,10 @@ export class LocalRunner implements RunnerClient {
     } catch (error) {
       throw new RunnerError("WORKSPACE_PREPARE_FAILED", error instanceof Error ? error.message : String(error));
     }
+    const runnerFinalizesEvents = !(adapter.handlesFinalEvents?.() ?? true);
+    const initialWorkspaceFingerprint = request.workspace.readOnly && request.executor.executorId !== "devagent"
+      ? await fingerprintWorkspace(workspacePath)
+      : null;
 
     const onEvent = (event: TaskExecutionEvent): void => {
       eventLogWrite = eventLogWrite
@@ -312,6 +370,7 @@ export class LocalRunner implements RunnerClient {
 
     const startedAt = new Date().toISOString();
     const resultPromise = handle.wait();
+    let timedOut = false;
     const timedPromise = request.constraints.timeoutSec && request.constraints.timeoutSec > 0
       ? new Promise<TaskExecutionResult>((resolve) => {
           const timeoutMs = request.constraints.timeoutSec! * 1000;
@@ -321,6 +380,7 @@ export class LocalRunner implements RunnerClient {
             } catch {
               // Best-effort cancel.
             }
+            timedOut = true;
             const timeoutResult = createTimeoutResult(request, startedAt);
             onEvent({
               protocolVersion: PROTOCOL_VERSION,
@@ -339,13 +399,38 @@ export class LocalRunner implements RunnerClient {
     const wrappedHandle = new LocalRunHandle(
       handle.id,
       Promise.race([resultPromise, ...(timedPromise ? [timedPromise] : [])]).then(async (result: TaskExecutionResult) => {
-        metadata.status = result.status;
+        let finalResult = result;
+        if (initialWorkspaceFingerprint) {
+          const finalWorkspaceFingerprint = await fingerprintWorkspace(workspacePath);
+          if (finalWorkspaceFingerprint !== initialWorkspaceFingerprint) {
+            finalResult = enforceReadOnlyResult(request, finalResult);
+          }
+        }
+        if (runnerFinalizesEvents && !timedOut) {
+          if (finalResult.artifacts[0]) {
+            onEvent({
+              protocolVersion: PROTOCOL_VERSION,
+              type: "artifact",
+              at: new Date().toISOString(),
+              taskId: request.taskId,
+              artifact: finalResult.artifacts[0],
+            });
+          }
+          onEvent({
+            protocolVersion: PROTOCOL_VERSION,
+            type: "completed",
+            at: new Date().toISOString(),
+            taskId: request.taskId,
+            status: finalResult.status,
+          });
+        }
+        metadata.status = finalResult.status;
         await flushEventLog();
-        await writeFile(resultPath, JSON.stringify(result, null, 2));
+        await writeFile(resultPath, JSON.stringify(finalResult, null, 2));
         await writeFile(join(runsDir, `${handle.id}.json`), JSON.stringify(metadata, null, 2));
         this.activeRuns.delete(handle.id);
         this.knownRuns.set(handle.id, metadata);
-        return result;
+        return finalResult;
       }).catch(async (error: unknown) => {
         metadata.status = "failed";
         await writeFile(join(runsDir, `${handle.id}.json`), JSON.stringify(metadata, null, 2));

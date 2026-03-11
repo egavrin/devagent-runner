@@ -27,12 +27,13 @@ bun run check:oss
 
 ## Done means
 
-- the DevAgent adapter path still works through Hub baseline smoke
+- the DevAgent adapter path still passes runner validation and downstream smoke coverage
 - artifacts and events are written predictably
 - cancellation, timeout, and cleanup behavior remain test-covered
+- non-DevAgent adapters keep structured event parsing and read-only enforcement intact
 - docs do not overstate experimental adapter maturity
 
 ## Supported vs experimental
 
-- Supported: `DevAgentAdapter` in the current Hub -> Runner -> DevAgent path
+- Supported: `DevAgentAdapter` in the current runner -> DevAgent path
 - Experimental: `CodexAdapter`, `ClaudeAdapter`, and `OpenCodeAdapter` until they have matching live validation

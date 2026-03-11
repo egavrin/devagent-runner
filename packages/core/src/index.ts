@@ -54,6 +54,7 @@ export abstract class TrackedRunHandle implements RunHandle {
 export interface ExecutorAdapter {
   executorId(): string;
   canHandle(spec: ExecutorSpec): boolean;
+  handlesFinalEvents?(): boolean;
   launch(
     request: TaskExecutionRequest,
     workspacePath: string,

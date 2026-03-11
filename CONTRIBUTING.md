@@ -11,12 +11,11 @@ local execution behavior for the DevAgent stack.
 - Node `20+`
 - the four sibling repos checked out side by side
 
-For the supported setup path, start from [`devagent-hub`](../devagent-hub/README.md):
+For local development, bootstrap the sibling repos directly:
 
 ```bash
-cd ../devagent-hub
-bun install
-bun run bootstrap:local
+cd ../devagent-sdk && bun install
+cd ../devagent-runner && bun install
 ```
 
 ## Local checks before opening a PR
@@ -28,11 +27,14 @@ bun run test
 bun run check:oss
 ```
 
-If your change affects the live path, also run the Hub baseline checks from `../devagent-hub`.
+If your change affects a downstream integration path, run that consumer's baseline checks in
+addition to the runner checks above.
 
 ## Contribution rules
 
 - Keep the DevAgent path stable first.
 - Treat other adapters as experimental unless live validation proves parity.
+- Keep non-DevAgent adapter command resolution aligned with adapter constructor overrides and runner
+  env overrides.
 - Keep PRs small and lifecycle-focused.
 - Update docs if you change setup, adapter maturity, or validation claims.
