@@ -2,6 +2,11 @@
 
 Local execution substrate for DevAgent workflow tasks.
 
+## Maturity
+
+Public alpha component. The repo is public, but the packages remain unpublished and are consumed
+through the sibling-repo bootstrap path documented in `devagent-hub`.
+
 ## Responsibilities
 
 - prepare isolated workspaces
@@ -78,10 +83,17 @@ Adapter maturity today:
 
 Treat the experimental adapters as development surfaces, not production-equivalent executor paths.
 
+## Limitations
+
+- packages are not published to a registry yet
+- the supported contributor path is the four-repo sibling checkout flow
+- only the DevAgent adapter is live-validated today
+
 ## Development
 
 ```bash
 bun install
 bun run typecheck
 bun run test
+bun run check:oss
 ```

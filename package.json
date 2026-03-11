@@ -1,8 +1,22 @@
 {
   "name": "devagent-runner",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.3.10",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/egavrin/devagent-runner.git"
+  },
+  "bugs": {
+    "url": "https://github.com/egavrin/devagent-runner/issues"
+  },
+  "homepage": "https://github.com/egavrin/devagent-runner#readme",
+  "engines": {
+    "bun": ">=1.3.10",
+    "node": ">=20"
+  },
   "workspaces": [
     "packages/*"
   ],
@@ -10,7 +24,8 @@
     "build": "bunx tsc -b packages/core packages/local-runner packages/adapters packages/cli",
     "typecheck": "bunx tsc -b --pretty false packages/core packages/local-runner packages/adapters packages/cli",
     "test": "bun run build && node ./node_modules/vitest/vitest.mjs run --config vitest.config.ts",
-    "lint": "bunx eslint packages/"
+    "lint": "bunx eslint packages/",
+    "check:oss": "node ./scripts/check-oss.mjs"
   },
   "devDependencies": {
     "@devagent-sdk/schema": "file:../devagent-sdk/packages/schema",
