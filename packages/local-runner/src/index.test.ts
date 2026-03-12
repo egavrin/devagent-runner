@@ -356,7 +356,7 @@ test("workspace manager reopens an existing git branch without resetting it", as
   await manager.cleanup(reopened.workspacePath);
 });
 
-test("workspace manager overlays uncommitted working tree files into git workspaces", async () => {
+test("workspace manager keeps git workspaces clean when the source repo is dirty", async () => {
   const repo = await createRealGitRepo();
   await writeFile(join(repo, "vitest.config.ts"), "export default {};\n");
   const manager = new FileSystemWorkspaceManager();
@@ -368,8 +368,32 @@ test("workspace manager overlays uncommitted working tree files into git workspa
     baseRef: "main",
   });
 
-  assert.equal(await readFile(join(workspacePath, "vitest.config.ts"), "utf-8"), "export default {};\n");
+  assert.equal(await fileExists(join(workspacePath, "vitest.config.ts")), false);
   await manager.cleanup(workspacePath);
+});
+
+test("local runner emits a warning when it ignores dirty source changes for git worktrees", async () => {
+  const repo = await createRealGitRepo();
+  await writeFile(join(repo, "vitest.config.ts"), "export default {};\n");
+  const runner = new LocalRunner({
+    adapters: [new OrderedFakeAdapter()],
+  });
+  const request = createRequest(repo, "task-dirty-git-worktree");
+  request.workspace.isolation = "git-worktree";
+  request.workspace.baseRef = "main";
+
+  const { runId } = await runner.startTask(request);
+  await runner.awaitResult(runId);
+  const metadata = await runner.inspect(runId);
+  const events = await readEventLog(metadata.eventLogPath);
+
+  assert.equal(
+    events.some((event) =>
+      event.type === "log" &&
+      event.message.includes("ignored local uncommitted source-repo changes"),
+    ),
+    true,
+  );
 });
 
 test("local runner records artifacts and result metadata", async () => {

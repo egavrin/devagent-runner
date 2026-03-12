@@ -105,30 +105,25 @@ async function copyRepoContents(sourceRepoPath: string, workspacePath: string): 
   }
 }
 
-async function overlayGitWorkingTreeChanges(sourceRepoPath: string, workspacePath: string): Promise<void> {
-  const rawStatus = await execFileStdout("git", ["status", "--porcelain"], sourceRepoPath);
-  const entries = rawStatus
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .filter(Boolean);
-
-  for (const entry of entries) {
-    const status = entry.slice(0, 2);
-    const rawPath = entry.slice(3);
-    const path = rawPath.includes(" -> ") ? rawPath.split(" -> ").at(-1)! : rawPath;
-    if (!path || path.startsWith(".git") || path.startsWith(".devagent-runner") || path.startsWith("node_modules")) {
-      continue;
-    }
-
-    const sourcePath = join(sourceRepoPath, path);
-    const workspacePathTarget = join(workspacePath, path);
-    if (status.includes("D")) {
-      await rm(workspacePathTarget, { recursive: true, force: true });
-      continue;
-    }
-
-    await mkdir(dirname(workspacePathTarget), { recursive: true });
-    await cp(sourcePath, workspacePathTarget, { recursive: true });
+async function hasDirtyWorkingTree(sourceRepoPath: string): Promise<boolean> {
+  try {
+    const rawStatus = await execFileStdout("git", ["status", "--porcelain"], sourceRepoPath);
+    return rawStatus
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .some((line) => {
+        if (!line) return false;
+        const rawPath = line.slice(3);
+        const path = rawPath.includes(" -> ") ? rawPath.split(" -> ").at(-1)! : rawPath;
+        return Boolean(
+          path &&
+          !path.startsWith(".git") &&
+          !path.startsWith(".devagent-runner") &&
+          !path.startsWith("node_modules"),
+        );
+      });
+  } catch {
+    return false;
   }
 }
 
@@ -248,7 +243,6 @@ export class FileSystemWorkspaceManager implements WorkspaceManager {
           ? ["worktree", "add", workspacePath, spec.workBranch]
           : ["worktree", "add", "-B", spec.workBranch, workspacePath, spec.baseRef ?? "HEAD"];
         await execFileAsync("git", worktreeArgs, spec.sourceRepoPath);
-        await overlayGitWorkingTreeChanges(spec.sourceRepoPath, workspacePath);
         await linkSharedDependencies(spec.sourceRepoPath, workspacePath);
         return { workspacePath };
       } catch {
@@ -352,6 +346,20 @@ export class LocalRunner implements RunnerClient {
         throw eventLogError;
       }
     };
+
+    if (
+      request.workspace.isolation === "git-worktree" &&
+      await hasDirtyWorkingTree(request.workspace.sourceRepoPath)
+    ) {
+      onEvent({
+        protocolVersion: PROTOCOL_VERSION,
+        type: "log",
+        at: new Date().toISOString(),
+        taskId: request.taskId,
+        stream: "stdout",
+        message: "Runner ignored local uncommitted source-repo changes and used a clean isolated workspace.",
+      });
+    }
 
     const handle = await adapter.launch(request, workspacePath, artifactDir, onEvent);
     const metadata: RunMetadata = {
