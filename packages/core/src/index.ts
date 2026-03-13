@@ -1,5 +1,6 @@
 import type {
   ExecutorSpec,
+  RepositoryWorkspaceSpec,
   TaskExecutionEvent,
   TaskExecutionRequest,
   TaskExecutionResult,
@@ -9,7 +10,10 @@ import type {
 export type RunStatus = "running" | "success" | "failed" | "cancelled";
 
 export interface WorkspaceManager {
-  prepare(spec: WorkspaceSpec): Promise<{ workspacePath: string }>;
+  prepare(spec: WorkspaceSpec): Promise<{
+    workspacePath: string;
+    repositoryPaths: Record<string, string>;
+  }>;
   cleanup(workspacePath: string): Promise<void>;
 }
 
@@ -58,6 +62,7 @@ export interface ExecutorAdapter {
   launch(
     request: TaskExecutionRequest,
     workspacePath: string,
+    repositoryPaths: Record<string, string>,
     artifactDir: string,
     onEvent: (event: TaskExecutionEvent) => void,
   ): Promise<RunHandle>;
@@ -87,4 +92,15 @@ export interface RunnerClient {
   subscribe(runId: string, onEvent: (event: TaskExecutionEvent) => void): Promise<void>;
   cancel(runId: string): Promise<void>;
   awaitResult(runId: string): Promise<TaskExecutionResult>;
+}
+
+export function primaryRepositorySpec(spec: WorkspaceSpec): RepositoryWorkspaceSpec {
+  const primary = spec.repositories.find((repository) => repository.repositoryId === spec.primaryRepositoryId);
+  if (!primary) {
+    throw new RunnerError(
+      "INVALID_REQUEST",
+      `Workspace primaryRepositoryId ${spec.primaryRepositoryId} does not match any repository execution spec.`,
+    );
+  }
+  return primary;
 }

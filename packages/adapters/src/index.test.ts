@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { chmod, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { afterEach, test } from "vitest";
 import {
@@ -26,24 +26,148 @@ function createRequest(
   executorId: TaskExecutionRequest["executor"]["executorId"],
   options: { model?: string; provider?: string; readOnly?: boolean } = {},
 ): TaskExecutionRequest {
+  const workspaceId = "workspace-1";
+  const repositoryId = "repo-1";
   return {
     protocolVersion: PROTOCOL_VERSION,
     taskId: `task-${executorId}`,
     taskType: "triage",
-    project: { id: "p1", name: "repo" },
-    workItem: { kind: "github-issue", externalId: "1", title: "Smoke test" },
-    workspace: {
-      sourceRepoPath: "/tmp/repo",
-      workBranch: `devagent/${executorId}/task`,
-      isolation: "temp-copy",
-      readOnly: options.readOnly,
+    workspaceRef: {
+      id: workspaceId,
+      name: "Adapter Workspace",
+      provider: "github",
+      primaryRepositoryId: repositoryId,
     },
+    repositories: [{
+      id: repositoryId,
+      workspaceId,
+      alias: "primary",
+      name: "repo",
+      repoRoot: "/tmp/repo",
+      repoFullName: "org/repo",
+      defaultBranch: "main",
+      provider: "github",
+    }],
+    workItem: {
+      id: "issue-1",
+      kind: "github-issue",
+      externalId: "1",
+      title: "Smoke test",
+      repositoryId,
+    },
+    execution: {
+      primaryRepositoryId: repositoryId,
+      repositories: [{
+        repositoryId,
+        alias: "primary",
+        sourceRepoPath: "/tmp/repo",
+        workBranch: `devagent/${executorId}/task`,
+        isolation: "temp-copy",
+        readOnly: options.readOnly,
+      }],
+    },
+    targetRepositoryIds: [repositoryId],
     executor: {
       executorId,
       model: options.model ?? "test-model",
       provider: options.provider,
     },
     constraints: {},
+    capabilities: {
+      canSyncTasks: true,
+      canCreateTask: true,
+      canComment: true,
+      canReview: true,
+      canMerge: true,
+      canOpenReviewable: true,
+    },
+    context: { summary: "smoke" },
+    expectedArtifacts: ["triage-report"],
+  };
+}
+
+function createMultiRepoRequest(
+  executorId: TaskExecutionRequest["executor"]["executorId"],
+  options: { primaryReadOnly?: boolean; secondaryReadOnly?: boolean; model?: string; provider?: string } = {},
+): TaskExecutionRequest {
+  const workspaceId = "workspace-1";
+  const primaryRepositoryId = "repo-1";
+  const secondaryRepositoryId = "repo-2";
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    taskId: `task-${executorId}-multi`,
+    taskType: "triage",
+    workspaceRef: {
+      id: workspaceId,
+      name: "Adapter Workspace",
+      provider: "github",
+      primaryRepositoryId,
+    },
+    repositories: [
+      {
+        id: primaryRepositoryId,
+        workspaceId,
+        alias: "primary",
+        name: "repo",
+        repoRoot: "/tmp/repo",
+        repoFullName: "org/repo",
+        defaultBranch: "main",
+        provider: "github",
+      },
+      {
+        id: secondaryRepositoryId,
+        workspaceId,
+        alias: "secondary",
+        name: "repo-support",
+        repoRoot: "/tmp/repo-support",
+        repoFullName: "org/repo-support",
+        defaultBranch: "main",
+        provider: "github",
+      },
+    ],
+    workItem: {
+      id: "issue-1",
+      kind: "github-issue",
+      externalId: "1",
+      title: "Smoke test",
+      repositoryId: primaryRepositoryId,
+    },
+    execution: {
+      primaryRepositoryId,
+      repositories: [
+        {
+          repositoryId: primaryRepositoryId,
+          alias: "primary",
+          sourceRepoPath: "/tmp/repo",
+          workBranch: `devagent/${executorId}/task`,
+          isolation: "temp-copy",
+          readOnly: options.primaryReadOnly,
+        },
+        {
+          repositoryId: secondaryRepositoryId,
+          alias: "secondary",
+          sourceRepoPath: "/tmp/repo-support",
+          workBranch: `devagent/${executorId}/task`,
+          isolation: "temp-copy",
+          readOnly: options.secondaryReadOnly,
+        },
+      ],
+    },
+    targetRepositoryIds: [primaryRepositoryId],
+    executor: {
+      executorId,
+      model: options.model ?? "test-model",
+      provider: options.provider,
+    },
+    constraints: {},
+    capabilities: {
+      canSyncTasks: true,
+      canCreateTask: true,
+      canComment: true,
+      canReview: true,
+      canMerge: true,
+      canOpenReviewable: true,
+    },
     context: { summary: "smoke" },
     expectedArtifacts: ["triage-report"],
   };
@@ -63,9 +187,10 @@ async function collectEvents(
   request: TaskExecutionRequest,
   workspacePath: string,
   artifactDir: string,
+  repositoryPaths: Record<string, string> = {},
 ): Promise<{ events: TaskExecutionEvent[]; result: TaskExecutionResult }> {
   const events: TaskExecutionEvent[] = [];
-  const handle = await adapter.launch(request, workspacePath, artifactDir, (event) => {
+  const handle = await adapter.launch(request, workspacePath, repositoryPaths, artifactDir, (event: TaskExecutionEvent) => {
     events.push(event);
   });
   return {
@@ -153,8 +278,9 @@ setTimeout(() => process.exit(0), 10000);
   const handle = await new DevAgentAdapter(`${process.execPath} ${stubPath}`).launch(
     createRequest("devagent"),
     workspacePath,
+    {},
     artifactDir,
-    (event) => {
+    (event: TaskExecutionEvent) => {
       events.push(event);
     },
   );
@@ -189,6 +315,40 @@ process.exit(1);
   assert.match(events[0]?.type === "log" ? events[0].message : "", /result file was never written/);
 });
 
+test("DevAgentAdapter launches from the prepared primary repository path", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const primaryRepoPath = join(workspacePath, "repos", "primary");
+  await mkdir(primaryRepoPath, { recursive: true });
+  const stubPath = join(root, "devagent-cwd-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+const fs = require("fs");
+const path = require("path");
+const args = process.argv.slice(2);
+const requestPath = args[args.indexOf("--request") + 1];
+const artifactDir = args[args.indexOf("--artifact-dir") + 1];
+const request = JSON.parse(fs.readFileSync(requestPath, "utf8"));
+const artifactPath = path.join(artifactDir, "triage-report.md");
+const resultPath = path.join(artifactDir, "result.json");
+fs.writeFileSync(path.join(artifactDir, "cwd.txt"), process.cwd());
+fs.writeFileSync(artifactPath, "# Triage\\n\\nStub output\\n");
+fs.writeFileSync(resultPath, JSON.stringify({ protocolVersion: "0.1", taskId: request.taskId, status: "success", artifacts: [{ kind: "triage-report", path: artifactPath, createdAt: new Date().toISOString() }], metrics: { startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), durationMs: 1 } }, null, 2));
+`);
+
+  const { result } = await collectEvents(
+    new DevAgentAdapter(`${process.execPath} ${stubPath}`),
+    createRequest("devagent"),
+    workspacePath,
+    artifactDir,
+    { "repo-1": primaryRepoPath },
+  );
+
+  assert.equal(result.status, "success");
+  assert.equal(
+    await realpath((await readFile(join(artifactDir, "cwd.txt"), "utf8")).trim()),
+    await realpath(primaryRepoPath),
+  );
+});
+
 test("CodexAdapter smoke test with stub executable", async () => {
   const { root, artifactDir, workspacePath } = await createWorkspace();
   const stubPath = join(root, "codex-stub.js");
@@ -216,6 +376,58 @@ process.stdout.write("{\\"type\\":\\"turn.completed\\"}\\n");
   assert.match(await readFile(join(artifactDir, "triage-report.md"), "utf8"), /stub codex output/);
 });
 
+test("CodexAdapter keeps mixed multi-repo requests writable", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "codex-mixed-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+const fs = require("fs");
+const args = process.argv.slice(2);
+const modeIndex = args.indexOf("-s");
+if (modeIndex === -1 || args[modeIndex + 1] !== "workspace-write") {
+  throw new Error("expected workspace-write mode");
+}
+const outIndex = args.indexOf("-o");
+if (outIndex >= 0) fs.writeFileSync(args[outIndex + 1], "stub codex output\\n");
+process.stdout.write("{\\"type\\":\\"item.completed\\",\\"item\\":{\\"type\\":\\"agent_message\\",\\"text\\":\\"stub codex output\\"}}\\n");
+`);
+
+  process.env.DEVAGENT_RUNNER_CODEX_BIN = `${process.execPath} ${stubPath}`;
+  const { result } = await collectEvents(
+    new CodexAdapter(),
+    createMultiRepoRequest("codex", { primaryReadOnly: false, secondaryReadOnly: true }),
+    workspacePath,
+    artifactDir,
+  );
+
+  assert.equal(result.status, "success");
+});
+
+test("CodexAdapter keeps fully read-only multi-repo requests read-only", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "codex-readonly-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+const fs = require("fs");
+const args = process.argv.slice(2);
+const modeIndex = args.indexOf("-s");
+if (modeIndex === -1 || args[modeIndex + 1] !== "read-only") {
+  throw new Error("expected read-only mode");
+}
+const outIndex = args.indexOf("-o");
+if (outIndex >= 0) fs.writeFileSync(args[outIndex + 1], "stub codex output\\n");
+process.stdout.write("{\\"type\\":\\"item.completed\\",\\"item\\":{\\"type\\":\\"agent_message\\",\\"text\\":\\"stub codex output\\"}}\\n");
+`);
+
+  process.env.DEVAGENT_RUNNER_CODEX_BIN = `${process.execPath} ${stubPath}`;
+  const { result } = await collectEvents(
+    new CodexAdapter(),
+    createMultiRepoRequest("codex", { primaryReadOnly: true, secondaryReadOnly: true }),
+    workspacePath,
+    artifactDir,
+  );
+
+  assert.equal(result.status, "success");
+});
+
 test("ClaudeAdapter smoke test with stub executable", async () => {
   const { root, artifactDir, workspacePath } = await createWorkspace();
   const stubPath = join(root, "claude-stub.js");
@@ -234,6 +446,52 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", result
   assert.equal(result.status, "success");
   assert.deepEqual(events.map((event) => event.type), ["started", "progress", "progress"]);
   assert.match(await readFile(join(artifactDir, "triage-report.md"), "utf8"), /claude stub output/);
+});
+
+test("ClaudeAdapter keeps mixed multi-repo requests writable", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "claude-mixed-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const permissionIndex = args.indexOf("--permission-mode");
+if (permissionIndex === -1 || args[permissionIndex + 1] !== "bypassPermissions") {
+  throw new Error("expected bypassPermissions");
+}
+process.stdout.write(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "claude stub output" }] } }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", result: "claude stub output" }) + "\\n");
+`);
+
+  const { result } = await collectEvents(
+    new ClaudeAdapter(`${process.execPath} ${stubPath}`),
+    createMultiRepoRequest("claude", { primaryReadOnly: false, secondaryReadOnly: true }),
+    workspacePath,
+    artifactDir,
+  );
+
+  assert.equal(result.status, "success");
+});
+
+test("ClaudeAdapter keeps fully read-only multi-repo requests read-only", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "claude-readonly-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const permissionIndex = args.indexOf("--permission-mode");
+if (permissionIndex === -1 || args[permissionIndex + 1] !== "plan") {
+  throw new Error("expected plan permission mode");
+}
+process.stdout.write(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "claude stub output" }] } }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", result: "claude stub output" }) + "\\n");
+`);
+
+  const { result } = await collectEvents(
+    new ClaudeAdapter(`${process.execPath} ${stubPath}`),
+    createMultiRepoRequest("claude", { primaryReadOnly: true, secondaryReadOnly: true }),
+    workspacePath,
+    artifactDir,
+  );
+
+  assert.equal(result.status, "success");
 });
 
 test("OpenCodeAdapter smoke test with stub executable", async () => {
@@ -267,6 +525,48 @@ process.stdout.write(JSON.stringify({ type: "step_finish", part: { type: "step-f
   assert.equal(result.status, "success");
   assert.deepEqual(events.map((event) => event.type), ["started", "progress", "progress", "progress"]);
   assert.match(await readFile(join(artifactDir, "triage-report.md"), "utf8"), /opencode stub output/);
+});
+
+test("OpenCodeAdapter keeps mixed multi-repo requests writable", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "opencode-mixed-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+const permissions = process.env.OPENCODE_PERMISSION || "";
+if (permissions.includes('"*":"deny"') || permissions.includes('"write":"deny"') || permissions.includes('"edit":"deny"')) {
+  throw new Error("expected writable permissions");
+}
+process.stdout.write(JSON.stringify({ type: "text", part: { type: "text", text: "opencode stub output" } }) + "\\n");
+`);
+
+  const { result } = await collectEvents(
+    new OpenCodeAdapter(`${process.execPath} ${stubPath}`),
+    createMultiRepoRequest("opencode", { primaryReadOnly: false, secondaryReadOnly: true }),
+    workspacePath,
+    artifactDir,
+  );
+
+  assert.equal(result.status, "success");
+});
+
+test("OpenCodeAdapter keeps fully read-only multi-repo requests read-only", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "opencode-readonly-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+const permissions = process.env.OPENCODE_PERMISSION || "";
+if (!permissions.includes('"*":"deny"') || !permissions.includes('"read":"allow"') || !permissions.includes('"edit":"deny"') || !permissions.includes('"write":"deny"')) {
+  throw new Error("expected read-only permissions");
+}
+process.stdout.write(JSON.stringify({ type: "text", part: { type: "text", text: "opencode stub output" } }) + "\\n");
+`);
+
+  const { result } = await collectEvents(
+    new OpenCodeAdapter(`${process.execPath} ${stubPath}`),
+    createMultiRepoRequest("opencode", { primaryReadOnly: true, secondaryReadOnly: true }),
+    workspacePath,
+    artifactDir,
+  );
+
+  assert.equal(result.status, "success");
 });
 
 test("OpenCodeAdapter passes provider-qualified model names through", async () => {

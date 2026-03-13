@@ -3,17 +3,20 @@ import { appendFile, mkdir, readFile, rm, writeFile, cp, stat, readdir, symlink,
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 import {
   type ExecutorAdapter,
   type RunHandle,
   type RunStatus,
   type RunnerClient,
   type WorkspaceManager,
+  primaryRepositorySpec,
   RunnerError,
   TrackedRunHandle,
 } from "@devagent-runner/core";
 import { validateTaskExecutionEvent, validateTaskExecutionResult } from "@devagent-sdk/validation";
 import type {
+  RepositoryWorkspaceSpec,
   TaskExecutionEvent,
   TaskExecutionRequest,
   TaskExecutionResult,
@@ -29,6 +32,7 @@ type RunMetadata = {
   artifactDir: string;
   eventLogPath: string;
   workspacePath: string;
+  repositoryPaths: Record<string, string>;
   pid?: number;
   resultPath: string;
 };
@@ -40,7 +44,15 @@ type ManagedRun = {
 };
 
 function workspaceRootFor(repoPath: string): string {
-  return join(repoPath, ".devagent-runner");
+  const override = process.env.DEVAGENT_RUNNER_ROOT?.trim();
+  if (override) {
+    return resolve(override);
+  }
+  return join(homedir(), ".devagent-runner");
+}
+
+function repositoryWorkspacePath(workspacePath: string, alias: string): string {
+  return join(workspacePath, "repos", alias);
 }
 
 async function isGitRepo(path: string): Promise<boolean> {
@@ -103,6 +115,46 @@ async function copyRepoContents(sourceRepoPath: string, workspacePath: string): 
     if (entry === ".devagent-runner" || entry === ".git" || entry === "node_modules") continue;
     await cp(join(sourceRepoPath, entry), join(workspacePath, entry), { recursive: true });
   }
+}
+
+async function prepareRepositoryWorkspace(
+  spec: RepositoryWorkspaceSpec,
+  targetPath: string,
+): Promise<void> {
+  if (await fileExists(targetPath)) {
+    return;
+  }
+
+  if (spec.isolation === "git-worktree" && await isGitRepo(spec.sourceRepoPath)) {
+    try {
+      const worktreeArgs = await branchExists(spec.sourceRepoPath, spec.workBranch)
+        ? ["worktree", "add", targetPath, spec.workBranch]
+        : ["worktree", "add", "-B", spec.workBranch, targetPath, spec.baseRef ?? "HEAD"];
+      await execFileAsync("git", worktreeArgs, spec.sourceRepoPath);
+      await linkSharedDependencies(spec.sourceRepoPath, targetPath);
+      return;
+    } catch {
+      await copyRepoContents(spec.sourceRepoPath, targetPath);
+      await linkSharedDependencies(spec.sourceRepoPath, targetPath);
+      return;
+    }
+  }
+
+  await copyRepoContents(spec.sourceRepoPath, targetPath);
+  await linkSharedDependencies(spec.sourceRepoPath, targetPath);
+}
+
+async function cleanupRepositoryWorkspace(path: string): Promise<void> {
+  const gitDir = join(path, ".git");
+  if (await fileExists(gitDir)) {
+    try {
+      await execFileAsync("git", ["worktree", "remove", "--force", path], path);
+      return;
+    } catch {
+      // Fall through to rm on temp copies and already-detached paths.
+    }
+  }
+  await rm(path, { recursive: true, force: true });
 }
 
 async function hasDirtyWorkingTree(sourceRepoPath: string): Promise<boolean> {
@@ -228,46 +280,37 @@ function enforceReadOnlyResult(
 }
 
 export class FileSystemWorkspaceManager implements WorkspaceManager {
-  async prepare(spec: WorkspaceSpec): Promise<{ workspacePath: string }> {
-    const runnerRoot = workspaceRootFor(spec.sourceRepoPath);
+  async prepare(spec: WorkspaceSpec): Promise<{
+    workspacePath: string;
+    repositoryPaths: Record<string, string>;
+  }> {
+    const primary = primaryRepositorySpec(spec);
+    const runnerRoot = workspaceRootFor(primary.sourceRepoPath);
     const workspacesRoot = join(runnerRoot, "workspaces");
-    const workspacePath = join(workspacesRoot, safeWorkspaceName(spec.workBranch));
-    await mkdir(workspacesRoot, { recursive: true });
-    if (await fileExists(workspacePath)) {
-      return { workspacePath };
+    const workspacePath = join(workspacesRoot, safeWorkspaceName(primary.workBranch));
+    const repositoriesRoot = join(workspacePath, "repos");
+    await mkdir(repositoriesRoot, { recursive: true });
+
+    const repositoryPaths: Record<string, string> = {};
+    for (const repository of spec.repositories) {
+      const repoPath = repositoryWorkspacePath(workspacePath, repository.alias);
+      await prepareRepositoryWorkspace(repository, repoPath);
+      repositoryPaths[repository.repositoryId] = repoPath;
     }
 
-    if (spec.isolation === "git-worktree" && await isGitRepo(spec.sourceRepoPath)) {
-      try {
-        const worktreeArgs = await branchExists(spec.sourceRepoPath, spec.workBranch)
-          ? ["worktree", "add", workspacePath, spec.workBranch]
-          : ["worktree", "add", "-B", spec.workBranch, workspacePath, spec.baseRef ?? "HEAD"];
-        await execFileAsync("git", worktreeArgs, spec.sourceRepoPath);
-        await linkSharedDependencies(spec.sourceRepoPath, workspacePath);
-        return { workspacePath };
-      } catch {
-        await copyRepoContents(spec.sourceRepoPath, workspacePath);
-        await linkSharedDependencies(spec.sourceRepoPath, workspacePath);
-        return { workspacePath };
-      }
-    }
-
-    await copyRepoContents(spec.sourceRepoPath, workspacePath);
-    await linkSharedDependencies(spec.sourceRepoPath, workspacePath);
-    return { workspacePath };
+    return { workspacePath, repositoryPaths };
   }
 
   async cleanup(workspacePath: string): Promise<void> {
-    const gitDir = join(workspacePath, ".git");
-    if (await fileExists(gitDir)) {
-      try {
-        await execFileAsync("git", ["worktree", "remove", "--force", workspacePath], workspacePath);
-        return;
-      } catch {
-        // Fall through to rm on temp copies and already-detached paths.
+    const reposRoot = join(workspacePath, "repos");
+    if (await fileExists(reposRoot)) {
+      for (const entry of await readdir(reposRoot)) {
+        await cleanupRepositoryWorkspace(join(reposRoot, entry));
       }
+      await rm(workspacePath, { recursive: true, force: true });
+      return;
     }
-    await rm(workspacePath, { recursive: true, force: true });
+    await cleanupRepositoryWorkspace(workspacePath);
   }
 }
 
@@ -305,7 +348,8 @@ export class LocalRunner implements RunnerClient {
       throw new RunnerError("EXECUTOR_NOT_FOUND", `No adapter found for executor ${request.executor.executorId}`);
     }
 
-    const runnerRoot = workspaceRootFor(request.workspace.sourceRepoPath);
+    const primaryExecution = primaryRepositorySpec(request.execution);
+    const runnerRoot = workspaceRootFor(primaryExecution.sourceRepoPath);
     const artifactDir = join(runnerRoot, "artifacts", request.taskId);
     const eventsDir = join(runnerRoot, "events");
     const runsDir = join(runnerRoot, "runs");
@@ -319,13 +363,16 @@ export class LocalRunner implements RunnerClient {
 
     const emitter = new EventEmitter();
     let workspacePath: string;
+    let repositoryPaths: Record<string, string>;
     try {
-      ({ workspacePath } = await this.workspaceManager.prepare(request.workspace));
+      ({ workspacePath, repositoryPaths } = await this.workspaceManager.prepare(request.execution));
     } catch (error) {
       throw new RunnerError("WORKSPACE_PREPARE_FAILED", error instanceof Error ? error.message : String(error));
     }
     const runnerFinalizesEvents = !(adapter.handlesFinalEvents?.() ?? true);
-    const initialWorkspaceFingerprint = request.workspace.readOnly && request.executor.executorId !== "devagent"
+    const initialWorkspaceFingerprint =
+      request.execution.repositories.some((repository) => repository.readOnly) &&
+      request.executor.executorId !== "devagent"
       ? await fingerprintWorkspace(workspacePath)
       : null;
 
@@ -347,10 +394,15 @@ export class LocalRunner implements RunnerClient {
       }
     };
 
-    if (
-      request.workspace.isolation === "git-worktree" &&
-      await hasDirtyWorkingTree(request.workspace.sourceRepoPath)
-    ) {
+    const hasDirtySourceRepo = (
+      await Promise.all(
+        request.execution.repositories
+          .filter((repository) => repository.isolation === "git-worktree")
+          .map(async (repository) => await hasDirtyWorkingTree(repository.sourceRepoPath)),
+      )
+    ).some(Boolean);
+
+    if (hasDirtySourceRepo) {
       onEvent({
         protocolVersion: PROTOCOL_VERSION,
         type: "log",
@@ -361,7 +413,7 @@ export class LocalRunner implements RunnerClient {
       });
     }
 
-    const handle = await adapter.launch(request, workspacePath, artifactDir, onEvent);
+    const handle = await adapter.launch(request, workspacePath, repositoryPaths, artifactDir, onEvent);
     const metadata: RunMetadata = {
       runId: handle.id,
       taskId: request.taskId,
@@ -370,6 +422,7 @@ export class LocalRunner implements RunnerClient {
       artifactDir,
       eventLogPath,
       workspacePath,
+      repositoryPaths,
       pid: handle.pid,
       resultPath,
     };
@@ -508,8 +561,7 @@ export class LocalRunner implements RunnerClient {
     const known = this.knownRuns.get(runId);
     if (known) return known;
 
-    const cwdGuess = process.cwd();
-    const candidate = join(workspaceRootFor(cwdGuess), "runs", `${runId}.json`);
+    const candidate = join(workspaceRootFor(process.cwd()), "runs", `${runId}.json`);
     if (!await fileExists(candidate)) {
       throw new RunnerError("INVALID_REQUEST", `Unknown run ${runId}`);
     }

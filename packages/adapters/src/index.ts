@@ -42,6 +42,10 @@ type LaunchOptions = {
   env?: NodeJS.ProcessEnv;
 };
 
+function isEntireRequestReadOnly(request: TaskExecutionRequest): boolean {
+  return request.execution.repositories.every((repository) => repository.readOnly);
+}
+
 function tokenizeCommand(command: string): string[] {
   const tokens: string[] = [];
   let current = "";
@@ -234,7 +238,7 @@ function bulletList(items: string[] | undefined): string {
 }
 
 function buildPrompt(request: TaskExecutionRequest): string {
-  const readOnlyInstruction = request.workspace.readOnly
+  const readOnlyInstruction = isEntireRequestReadOnly(request)
     ? [
         "Workspace is read-only. Do not modify files.",
         "Prefer answering directly from the provided task context.",
@@ -264,7 +268,7 @@ function buildPrompt(request: TaskExecutionRequest): string {
       ? `Verification commands:\n${request.constraints.verifyCommands.map((command) => `- ${command}`).join("\n")}`
       : "",
     readOnlyInstruction,
-    request.workspace.readOnly
+    isEntireRequestReadOnly(request)
       ? "Do not use tools unless the final artifact would otherwise be impossible to produce."
       : "Use available tools and shell access as needed.",
     `Return only the ${expectedArtifact} body in Markdown with concise, operator-ready content. Do not wrap the response in code fences or add commentary outside the artifact body.`,
@@ -499,6 +503,7 @@ abstract class StructuredCliAdapter implements ExecutorAdapter {
   async launch(
     request: TaskExecutionRequest,
     workspacePath: string,
+    repositoryPaths: Record<string, string>,
     artifactDir: string,
     onEvent: (event: TaskExecutionEvent) => void,
   ): Promise<RunHandle> {
@@ -653,6 +658,7 @@ export class DevAgentAdapter implements ExecutorAdapter {
   async launch(
     request: TaskExecutionRequest,
     workspacePath: string,
+    repositoryPaths: Record<string, string>,
     artifactDir: string,
     onEvent: (event: TaskExecutionEvent) => void,
   ): Promise<RunHandle> {
@@ -661,11 +667,13 @@ export class DevAgentAdapter implements ExecutorAdapter {
     await mkdir(artifactDir, { recursive: true });
     await writeFile(requestPath, JSON.stringify(request, null, 2));
     const commandParts = tokenizeCommand(this.command);
+    const primaryRepositoryPath =
+      repositoryPaths[request.execution.primaryRepositoryId] ?? workspacePath;
     const child = spawn(
       commandParts[0]!,
       [...commandParts.slice(1), "execute", "--request", requestPath, "--artifact-dir", artifactDir],
       {
-        cwd: workspacePath,
+        cwd: primaryRepositoryPath,
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -792,7 +800,7 @@ export class CodexAdapter extends StructuredCliAdapter {
       "-m",
       executor.model ?? "gpt-5-codex",
       "-s",
-      request.workspace.readOnly ? "read-only" : "workspace-write",
+      isEntireRequestReadOnly(request) ? "read-only" : "workspace-write",
       prompt,
     ];
   }
@@ -864,7 +872,7 @@ export class ClaudeAdapter extends StructuredCliAdapter {
       "--output-format",
       "stream-json",
       "--permission-mode",
-      request.workspace.readOnly ? "plan" : "bypassPermissions",
+      isEntireRequestReadOnly(request) ? "plan" : "bypassPermissions",
       "--model",
       executor.model ?? "sonnet",
       prompt,
@@ -960,7 +968,7 @@ export class OpenCodeAdapter extends StructuredCliAdapter {
   }
 
   protected override launchOptions(request: TaskExecutionRequest): LaunchOptions {
-    if (!request.workspace.readOnly) {
+    if (!isEntireRequestReadOnly(request)) {
       return {};
     }
 
