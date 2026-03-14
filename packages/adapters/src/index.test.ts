@@ -267,6 +267,66 @@ process.on("beforeExit", () => {
   assert.deepEqual(events.map((event) => event.type), ["started", "artifact", "completed"]);
 });
 
+test("DevAgentAdapter forwards continuation requests and parses returned session metadata", async () => {
+  const { root, artifactDir, workspacePath } = await createWorkspace();
+  const stubPath = join(root, "devagent-continuation-stub.js");
+  await createStub(stubPath, `#!/usr/bin/env node
+const fs = require("fs");
+const path = require("path");
+const args = process.argv.slice(2);
+const requestPath = args[args.indexOf("--request") + 1];
+const artifactDir = args[args.indexOf("--artifact-dir") + 1];
+const request = JSON.parse(fs.readFileSync(requestPath, "utf8"));
+if (!request.continuation || request.continuation.mode !== "resume") {
+  process.stderr.write("missing continuation");
+  process.exit(1);
+}
+const artifactPath = path.join(artifactDir, "triage-report.md");
+const resultPath = path.join(artifactDir, "result.json");
+fs.writeFileSync(artifactPath, "# Triage\\n\\nResumed session\\n");
+fs.writeFileSync(resultPath, JSON.stringify({
+  protocolVersion: "0.1",
+  taskId: request.taskId,
+  status: "success",
+  session: {
+    kind: "devagent-headless-v1",
+    payload: {
+      version: 1,
+      messages: [{ role: "assistant", content: "Resumed session" }]
+    }
+  },
+  outcome: "completed",
+  artifacts: [{ kind: "triage-report", path: artifactPath, createdAt: new Date().toISOString() }],
+  metrics: { startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), durationMs: 1 }
+}, null, 2));
+`);
+
+  const request = createRequest("devagent");
+  request.continuation = {
+    mode: "resume",
+    reason: "retry_no_progress",
+    instructions: "Continue the previous session.",
+    session: {
+      kind: "devagent-headless-v1",
+      payload: {
+        version: 1,
+        messages: [],
+      },
+    },
+  };
+
+  const { result } = await collectEvents(
+    new DevAgentAdapter(`${process.execPath} ${stubPath}`),
+    request,
+    workspacePath,
+    artifactDir,
+  );
+
+  assert.equal(result.status, "success");
+  assert.equal(result.session?.kind, "devagent-headless-v1");
+  assert.equal(result.outcome, "completed");
+});
+
 test("DevAgentAdapter reports cancelled runs as cancelled", async () => {
   const { root, artifactDir, workspacePath } = await createWorkspace();
   const stubPath = join(root, "devagent-cancel-stub.js");

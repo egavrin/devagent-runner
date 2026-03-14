@@ -265,6 +265,24 @@ async function readLinkSafe(path: string): Promise<string> {
   }
 }
 
+async function fingerprintReadonlyRepositories(
+  request: TaskExecutionRequest,
+  repositoryPaths: Record<string, string>,
+): Promise<Map<string, string>> {
+  const fingerprints = new Map<string, string>();
+  for (const repository of request.execution.repositories) {
+    if (!repository.readOnly) {
+      continue;
+    }
+    const repositoryPath = repositoryPaths[repository.repositoryId];
+    if (!repositoryPath) {
+      continue;
+    }
+    fingerprints.set(repository.repositoryId, await fingerprintWorkspace(repositoryPath));
+  }
+  return fingerprints;
+}
+
 function enforceReadOnlyResult(
   request: TaskExecutionRequest,
   result: TaskExecutionResult,
@@ -370,10 +388,8 @@ export class LocalRunner implements RunnerClient {
       throw new RunnerError("WORKSPACE_PREPARE_FAILED", error instanceof Error ? error.message : String(error));
     }
     const runnerFinalizesEvents = !(adapter.handlesFinalEvents?.() ?? true);
-    const initialWorkspaceFingerprint =
-      request.execution.repositories.some((repository) => repository.readOnly) &&
-      request.executor.executorId !== "devagent"
-      ? await fingerprintWorkspace(workspacePath)
+    const initialReadonlyFingerprints = request.execution.repositories.some((repository) => repository.readOnly)
+      ? await fingerprintReadonlyRepositories(request, repositoryPaths)
       : null;
 
     const onEvent = (event: TaskExecutionEvent): void => {
@@ -461,9 +477,12 @@ export class LocalRunner implements RunnerClient {
       handle.id,
       Promise.race([resultPromise, ...(timedPromise ? [timedPromise] : [])]).then(async (result: TaskExecutionResult) => {
         let finalResult = result;
-        if (initialWorkspaceFingerprint) {
-          const finalWorkspaceFingerprint = await fingerprintWorkspace(workspacePath);
-          if (finalWorkspaceFingerprint !== initialWorkspaceFingerprint) {
+        if (initialReadonlyFingerprints) {
+          const finalReadonlyFingerprints = await fingerprintReadonlyRepositories(request, repositoryPaths);
+          const readOnlyWorkspaceChanged = [...initialReadonlyFingerprints.entries()].some(([repositoryId, fingerprint]) =>
+            finalReadonlyFingerprints.get(repositoryId) !== fingerprint
+          );
+          if (readOnlyWorkspaceChanged) {
             finalResult = enforceReadOnlyResult(request, finalResult);
           }
         }

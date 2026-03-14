@@ -110,6 +110,33 @@ function createRequest(sourceRepoPath: string, taskId = "task-1"): TaskExecution
   };
 }
 
+function createMultiRepoRequest(
+  primarySourceRepoPath: string,
+  secondarySourceRepoPath: string,
+  taskId = "task-multi",
+): TaskExecutionRequest {
+  const request = createRequest(primarySourceRepoPath, taskId);
+  request.repositories.push({
+    id: "repo-2",
+    workspaceId: request.workspaceRef.id,
+    alias: "secondary",
+    name: "secondary",
+    repoRoot: secondarySourceRepoPath,
+    repoFullName: "example/secondary",
+    defaultBranch: "main",
+    provider: "github",
+  });
+  request.execution.repositories.push({
+    repositoryId: "repo-2",
+    alias: "secondary",
+    sourceRepoPath: secondarySourceRepoPath,
+    workBranch: "devagent/workflow/shared-branch",
+    isolation: "temp-copy",
+    readOnly: true,
+  });
+  return request;
+}
+
 class StaticHandle implements RunHandle {
   constructor(
     readonly id: string,
@@ -257,6 +284,70 @@ class RunnerFinalizedAdapter implements ExecutorAdapter {
     })();
 
     return new StaticHandle("run-runner-finalized", result);
+  }
+}
+
+class RepositoryMutatingAdapter implements ExecutorAdapter {
+  constructor(
+    private readonly id: string,
+    private readonly repositoryAliasToMutate: string,
+  ) {}
+
+  executorId(): string {
+    return this.id;
+  }
+
+  canHandle(): boolean {
+    return true;
+  }
+
+  handlesFinalEvents(): boolean {
+    return false;
+  }
+
+  async launch(
+    request: TaskExecutionRequest,
+    _workspacePath: string,
+    repositoryPaths: Record<string, string>,
+    artifactDir: string,
+    onEvent: (event: TaskExecutionEvent) => void,
+  ): Promise<RunHandle> {
+    onEvent({
+      protocolVersion: PROTOCOL_VERSION,
+      type: "started",
+      at: new Date().toISOString(),
+      taskId: request.taskId,
+    });
+
+    const targetRepository = request.execution.repositories.find((repository) => repository.alias === this.repositoryAliasToMutate);
+    if (!targetRepository) {
+      throw new Error(`Missing repository alias ${this.repositoryAliasToMutate}`);
+    }
+    const repositoryPath = repositoryPaths[targetRepository.repositoryId];
+    if (!repositoryPath) {
+      throw new Error(`Missing workspace path for ${targetRepository.repositoryId}`);
+    }
+    await writeFile(join(repositoryPath, "README.md"), `mutated ${this.repositoryAliasToMutate}\n`);
+
+    const artifactPath = join(artifactDir, "triage-report.md");
+    await writeFile(artifactPath, "# Triage\n");
+    const artifact: ArtifactRef = {
+      kind: "triage-report",
+      path: artifactPath,
+      createdAt: new Date().toISOString(),
+    };
+
+    return new StaticHandle(`run-${this.id}-${this.repositoryAliasToMutate}`, Promise.resolve({
+      protocolVersion: PROTOCOL_VERSION,
+      taskId: request.taskId,
+      status: "success",
+      artifacts: [artifact],
+      metrics: {
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        durationMs: 1,
+      },
+    }));
   }
 }
 
@@ -633,7 +724,7 @@ test("local runner finalizes artifact and completed events for structured adapte
 test("local runner fails non-devagent executors that modify read-only workspaces", async () => {
   const repo = await createRepo();
   const runner = new LocalRunner({
-    adapters: [new RunnerFinalizedAdapter(true)],
+    adapters: [new RepositoryMutatingAdapter("codex", "primary")],
   });
   const request = createRequest(repo, "task-readonly-violation");
   request.executor.executorId = "codex";
@@ -644,4 +735,50 @@ test("local runner fails non-devagent executors that modify read-only workspaces
 
   assert.equal(result.status, "failed");
   assert.equal(result.error?.message, "Executor codex modified a read-only workspace.");
+});
+
+test("local runner fails devagent executors that modify read-only workspaces", async () => {
+  const repo = await createRepo();
+  const runner = new LocalRunner({
+    adapters: [new RepositoryMutatingAdapter("devagent", "primary")],
+  });
+  const request = createRequest(repo, "task-readonly-violation-devagent");
+  request.execution.repositories[0]!.readOnly = true;
+
+  const { runId } = await runner.startTask(request);
+  const result = await runner.awaitResult(runId);
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.error?.message, "Executor devagent modified a read-only workspace.");
+});
+
+test("local runner allows writable repo changes while still protecting readonly repos", async () => {
+  const primaryRepo = await createRepo();
+  const secondaryRepo = await createRepo();
+  const runner = new LocalRunner({
+    adapters: [new RepositoryMutatingAdapter("devagent", "primary")],
+  });
+  const request = createMultiRepoRequest(primaryRepo, secondaryRepo, "task-readonly-mixed-primary");
+  request.execution.repositories[0]!.readOnly = false;
+
+  const { runId } = await runner.startTask(request);
+  const result = await runner.awaitResult(runId);
+
+  assert.equal(result.status, "success");
+});
+
+test("local runner fails when a readonly secondary repo is modified", async () => {
+  const primaryRepo = await createRepo();
+  const secondaryRepo = await createRepo();
+  const runner = new LocalRunner({
+    adapters: [new RepositoryMutatingAdapter("devagent", "secondary")],
+  });
+  const request = createMultiRepoRequest(primaryRepo, secondaryRepo, "task-readonly-mixed-secondary");
+  request.execution.repositories[0]!.readOnly = false;
+
+  const { runId } = await runner.startTask(request);
+  const result = await runner.awaitResult(runId);
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.error?.message, "Executor devagent modified a read-only workspace.");
 });
